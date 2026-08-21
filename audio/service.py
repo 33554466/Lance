@@ -114,25 +114,63 @@ def resolve_devices(cfg: dict) -> None:
              devices[out_idx]["name"] if out_idx is not None else "<default>")
 
 
-def probe_capture(cfg: dict, seconds: float = 0.3) -> bool:
+def probe_capture(cfg: dict, timeout: float = 4.0) -> bool:
     """Can we actually read audio, right now?
 
     Enumeration is not health. After a warm reboot the array enumerates,
-    snd-usb-audio binds, `arecord -l` lists the card — and every read returns
-    EIO. Nothing short of pulling a frame off the device tells you the
-    difference, so pull one.
+    snd-usb-audio binds, `arecord -l` lists the card — and every read either
+    returns EIO or, worse, simply never delivers a frame. Nothing short of
+    pulling audio off the device distinguishes the two.
+
+    This must never block. The first version of this function called
+    stream.read(), which waits for frames that a wedged device will never
+    send: the service sat in it for five minutes holding /dev/snd/pcmC0D0c
+    open, so it never reached the recovery code AND made every other tool
+    report the device as busy rather than broken. A health check that can
+    hang is worse than no health check at all.
+
+    So: open with a callback, wait on an Event with a deadline, and run the
+    whole thing on a daemon thread so that even a hang inside PortAudio's
+    own close path cannot stop the service from moving on.
     """
     import sounddevice as sd
 
-    try:
-        with sd.InputStream(samplerate=cfg["audio"]["sample_rate"],
-                            channels=1, dtype="float32", blocksize=1024,
-                            device=cfg["audio"].get("input_device")) as stream:
-            stream.read(int(cfg["audio"]["sample_rate"] * seconds))
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning("capture probe failed (%s: %s)", type(exc).__name__, exc)
+    got_audio = threading.Event()
+    finished = threading.Event()
+    outcome: dict = {}
+
+    def worker() -> None:
+        def callback(indata, frames, time_info, status):  # noqa: ARG001
+            # Any frame at all is proof of life. Silence is fine; we are
+            # testing the transport, not whether anyone is talking.
+            got_audio.set()
+
+        try:
+            with sd.InputStream(samplerate=cfg["audio"]["sample_rate"],
+                                channels=1, dtype="float32", blocksize=1024,
+                                device=cfg["audio"].get("input_device"),
+                                callback=callback):
+                got_audio.wait(timeout)
+        except Exception as exc:  # noqa: BLE001
+            outcome["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            finished.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    # Give the worker the probe window plus a little room to tear down.
+    if not finished.wait(timeout + 2.0):
+        log.warning("capture probe hung — the device is enumerated but is "
+                    "not delivering audio, and will not close cleanly")
         return False
+    if "error" in outcome:
+        log.warning("capture probe failed (%s)", outcome["error"])
+        return False
+    if not got_audio.is_set():
+        log.warning("capture probe opened the device but no audio arrived "
+                    "in %.1fs", timeout)
+        return False
+    return True
 
 
 def ensure_capture_works(cfg: dict) -> bool:
@@ -150,7 +188,7 @@ def ensure_capture_works(cfg: dict) -> bool:
     number worth watching.
     """
     resolve_devices(cfg)
-    if True:  # probe disabled
+    if probe_capture(cfg):
         log.info("capture healthy")
         return True
 
@@ -163,22 +201,26 @@ def ensure_capture_works(cfg: dict) -> bool:
     if usb_power_cycle(vid_pid,
                        off_seconds=cfg["audio"].get("usb_power_off_seconds", 3)):
         resolve_devices(cfg)
-        if True:  # probe disabled
+        if probe_capture(cfg):
             log.info("recovered by power cycling the port")
             return True
 
     if usb_reset(vid_pid):
         resolve_devices(cfg)
-        if True:  # probe disabled
+        if probe_capture(cfg):
             log.info("recovered by USB reset")
             return True
 
     log.error(
-        "could not revive the microphone in software. Every reset the host "
-        "can issue leaves VBUS up, and this device needs VBUS to drop. Move "
-        "it to a hub port that supports per-port power switching "
-        "(`uhubctl` lists them) and this becomes automatic; until then it "
-        "needs a physical replug after a warm reboot.")
+        "could not revive the microphone in software.\n"
+        "    Measured on this build: USBDEVFS_RESET, authorized-toggling, "
+        "driver unbind/rebind and uhubctl power cycling ALL fail. Only "
+        "physically unplugging it for ~10s works, because the XMOS "
+        "processor only restarts when VBUS actually goes away, and no reset "
+        "the host can issue takes VBUS away.\n"
+        "    UNPLUG THE MICROPHONE'S USB CABLE, WAIT TEN SECONDS, PLUG IT "
+        "BACK IN. This service is still running and will pick it up on its "
+        "own within a minute — you do not need to restart anything.")
     return False
 
 

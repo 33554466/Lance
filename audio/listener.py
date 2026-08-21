@@ -104,7 +104,7 @@ class Listener:
         )
         self._stream.start()
         log.info("input stream open at %d Hz on device %s",
-                 self.sr, self.input_device or "<default>")
+                 self.sr, self.input_device if self.input_device is not None else "<default>")
 
     def stop(self) -> None:
         if self._stream:
