@@ -1,0 +1,25 @@
+# ~/.config/systemd/user/assistant-core.service
+#
+# The orchestrator. The only process that holds an API key.
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now assistant-core
+#   loginctl enable-linger $USER      # <- so it runs without you logged in
+
+[Unit]
+Description=Assistant orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/assistant
+EnvironmentFile=%h/assistant/.env
+ExecStart=%h/assistant/.venv/bin/uvicorn core.app:app --host 127.0.0.1 --port 8760
+Restart=always
+RestartSec=3
+# Degrade, never die: keep restarting even after repeated rapid failures.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

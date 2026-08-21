@@ -1,0 +1,205 @@
+# ============================================================
+# Home AI Appliance — configuration
+# Everything you are likely to tune lives here.
+# ============================================================
+
+identity:
+  # What the assistant calls itself. Used in the system prompt.
+  name: "Ada"
+  # The user's name, so it can address you.
+  user: "Brendan"
+
+server:
+  host: "127.0.0.1"
+  port: 8760
+
+provider:
+  # Which backend to use. Only "anthropic" is implemented in this
+  # scaffold; the adapter layer in core/provider.py is where you would
+  # add "openai" or "google" without touching anything else.
+  name: "anthropic"
+
+  models:
+    small: "claude-haiku-4-5"     # timers, conversions, quick lookups
+    mid:   "claude-sonnet-5"      # the workhorse — default
+    top:   "claude-opus-5"        # long documents, careful reasoning
+
+  # Hard ceiling per reply. Spoken answers should be short; this is a
+  # backstop against a runaway generation, not a style control.
+  max_tokens: 1024
+
+  # Anthropic prompt caching. Caches the system prompt + tool schemas,
+  # which are identical on every request and are most of your input
+  # tokens. Cuts input cost by roughly 90% on the cached portion.
+  prompt_caching: true
+
+router:
+  # Requests shorter than this many characters with no complexity
+  # markers go to the small tier.
+  small_max_chars: 80
+  # Saying any of these out loud forces the top tier.
+  escalate_phrases:
+    - "think hard"
+    - "think carefully"
+    - "take your time"
+  # Words that push a short request up to the mid tier anyway.
+  complexity_markers:
+    - "why"
+    - "explain"
+    - "compare"
+    - "draft"
+    - "write"
+    - "summarize"
+    - "summarise"
+    - "analyze"
+    - "analyse"
+
+context:
+  # How many prior turns (user+assistant pairs) to send. Capping this is
+  # what stops your input cost growing without bound over a long day.
+  history_turns: 8
+  # Characters of system prompt + persona. Kept small deliberately.
+  system_prompt: |
+    You are {name}, a voice assistant running on a dedicated appliance in
+    {user}'s home. You are speaking out loud, so your replies are read by a
+    text-to-speech engine.
+
+    Keep answers short. Two or three sentences is usually right. If the
+    answer is genuinely long, give the headline first and offer to go on.
+
+    Never use markdown, bullet points, asterisks, or emoji — they are read
+    aloud as noise. Write numbers and units the way a person would say
+    them. Spell out anything that would be mangled if read literally.
+
+    If you do not know something, say so in one short sentence rather than
+    guessing. If a request is ambiguous, ask one clarifying question.
+
+    After you answer, the microphone stays open for a few seconds, so {user}
+    can follow up without saying the wake word again. Offering a follow-up is
+    fine. Do not tell them to say the wake word again — they do not need to.
+
+audio:
+  # Device names as they appear in `python -m sounddevice`. Match on NAME,
+  # never on index — card numbers shift on USB re-enumeration and an
+  # appliance that goes silently deaf after a power blip is the worst kind
+  # of broken.
+  #
+  # BOTH of these must be the ReSpeaker. That is not a typo and it is the
+  # single most important line in this file.
+  #
+  # The XVF3800 does acoustic echo cancellation by comparing what the mics
+  # hear against a reference of what is being played. It gets that
+  # reference from ITS OWN USB playback endpoint. Play the assistant's
+  # voice through the SER8's HDMI or its onboard 3.5 mm jack instead and
+  # the chip never sees the reference — AEC degrades to guesswork, the
+  # assistant starts triggering on its own voice, and barge-in stops
+  # working. Everything good about this microphone depends on closing that
+  # loop.
+  #
+  # Wiring: TTS -> ReSpeaker over USB -> ReSpeaker's 3.5 mm jack -> your
+  # powered speaker. (Or its JST connector, which drives a 5 W speaker
+  # directly.)
+  input_device: "Array"
+  output_device: "Array"
+
+  # Recover the microphone over USB, by vendor:product id.
+  #
+  # A warm reboot does not cut USB bus power, so the array's processor never
+  # restarts. It comes back enumerated and bound but with a wedged audio
+  # endpoint — arecord returns "Input/output error" and the assistant is
+  # silently deaf until somebody physically unplugs it. That is not an
+  # acceptable failure mode for a device meant to survive a power cut on its
+  # own.
+  #
+  # At startup the service reads a fraction of a second of audio to see
+  # whether the device actually works. Only if that fails does it escalate:
+  # first cutting power to the array's hub port with uhubctl (which is
+  # genuinely equivalent to unplugging it), then falling back to
+  # USBDEVFS_RESET. Measured here, the reset alone does NOT clear the wedge —
+  # power has to drop.
+  #
+  # Requirements, both of which install.sh handles:
+  #   * uhubctl installed, and the array plugged into a hub that supports
+  #     per-port power switching. Run `uhubctl` to see which of yours do —
+  #     the SER8's own rear ports do not, the Sabrent's internal hubs do.
+  #   * the udev rules in systemd/99-respeaker.rules, which cover the hub as
+  #     well as the microphone.
+  #
+  # Set to null to disable recovery entirely.
+  usb_reset: "2886:001a"
+  # How long to hold the port unpowered. Two seconds is usually enough for
+  # the XMOS to fully discharge; three is cheap insurance.
+  usb_power_off_seconds: 3
+
+  sample_rate: 16000
+  frame_ms: 80             # 1280 samples at 16 kHz
+
+wake_word:
+  # openWakeWord model. The bundled options are: alexa, hey_jarvis,
+  # hey_mycroft, hey_rhasspy, ok_nabu, timer, weather.
+  # Train your own at https://github.com/dscripka/openWakeWord
+  model: "hey_jarvis"
+  # Detection threshold. START HERE when tuning. Higher = fewer false
+  # positives and more missed wakes. Log every trigger for a week and
+  # adjust against your own household, not against a benchmark.
+  threshold: 0.55
+  # Ignore further detections for this long after one fires.
+  refractory_seconds: 2.0
+
+vad:
+  # Trailing silence before we decide you have stopped talking. Too low
+  # and it cuts you off mid-sentence; too high and the device feels dead.
+  silence_ms: 700
+  # Hard cap on a single utterance.
+  max_utterance_seconds: 20
+  # Minimum speech before we bother transcribing — rejects a cough.
+  min_speech_ms: 300
+
+stt:
+  # faster-whisper model size. base.en is the floor; small.en is
+  # noticeably better on accents, proper nouns, and cross-room speech and
+  # runs comfortably on the SER8.
+  model: "small.en"
+  device: "cpu"
+  compute_type: "int8"
+  beam_size: 1
+  language: "en"
+  # Whisper confabulates text from silence. Anything below this average
+  # log-probability is discarded rather than sent to the model.
+  min_logprob: -1.0
+
+tts:
+  engine: "piper"
+  # Path is resolved by scripts/fetch_models.sh
+  voice: "models/piper/en_US-lessac-medium.onnx"
+  # Speaking rate. 1.0 is the model default; lower is slower.
+  length_scale: 1.0
+
+behaviour:
+  # Play a short tone the instant the wake word fires, before
+  # transcription begins. Tells you it heard you.
+  ack_chime: true
+  # Stop TTS playback when speech is detected during playback.
+  barge_in: true
+  # Mute the wake-word listener while speaking. Belt and braces on top of
+  # the mic array's hardware echo cancellation.
+  mute_while_speaking: true
+  # After a reply finishes, reopen the microphone for this long so you can
+  # ask a follow-up without saying the wake word again. Set 0 to require the
+  # wake word every time.
+  #
+  # Keep this consistent with the system prompt: if it is 0, the assistant
+  # should not be offering follow-ups, because you would not be able to give
+  # one. See context.system_prompt.
+  follow_up_seconds: 8
+
+storage:
+  db_path: "data/assistant.db"
+  vault_path: "data/vault"
+
+logging:
+  level: "INFO"
+  # Log every wake-word trigger with its confidence score. Leave this on
+  # for the first week — it is the only way to tune the threshold
+  # honestly.
+  log_wake_events: true

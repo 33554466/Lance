@@ -1,0 +1,38 @@
+# Let the assistant reset the mic array over USB without running as root.
+#
+#   sudo cp 99-respeaker.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Scoped to exactly one device by vendor:product — this is not a blanket USB
+# permission, it is "anyone on this machine may reset this one microphone".
+#
+# Why MODE 0666 rather than a group:
+#
+#   GROUP="audio" needs the service user to be in that group, and Ubuntu no
+#   longer puts desktop users there now that PipeWire handles audio. Adding
+#   them works, but group membership only applies to a NEW login session,
+#   and a lingering systemd user manager does not get one on boot.
+#
+#   TAG+="uaccess" is the modern answer, but it grants access to the user of
+#   an ACTIVE SEAT. This appliance boots with nobody logged in — which is the
+#   precise case the reset exists for — so there is no seat to grant from.
+#
+#   0666 on one microphone, on a machine with one user, is the right trade.
+#   Anyone who can reach this box to abuse it can already unplug the thing.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2886", ATTR{idProduct}=="001a", MODE="0666"
+
+# The USB hub itself.
+#
+# A protocol reset is not enough for this microphone — measured on this
+# build, USBDEVFS_RESET, authorized-toggling and driver unbind/rebind all
+# leave it returning EIO after a warm reboot. None of them cut VBUS, and its
+# XMOS processor only recovers when power actually goes away.
+#
+# The software equivalent of unplugging it is per-port power switching, and
+# uhubctl issues that as a control transfer to the HUB, not to the
+# microphone. So the rule above grants nothing useful for it; the hub needs
+# its own. 0bda:5411 is the Realtek controller inside the Sabrent hub — three
+# of them appear, one per internal tier, and all three match this one rule.
+#
+# Check yours before trusting this line:  lsusb | grep -i hub
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="5411", MODE="0666"

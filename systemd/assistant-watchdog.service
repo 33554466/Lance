@@ -1,0 +1,8 @@
+# ~/.config/systemd/user/assistant-watchdog.service
+[Unit]
+Description=Assistant health check
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/assistant
+ExecStart=%h/assistant/scripts/watchdog.sh

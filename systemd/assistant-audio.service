@@ -1,0 +1,27 @@
+# ~/.config/systemd/user/assistant-audio.service
+#
+# Owns the sound devices. Never touches the network beyond localhost.
+# Starts after core, but reconnects on its own if core restarts, so the
+# ordering is a convenience rather than a requirement.
+
+[Unit]
+Description=Assistant audio pipeline
+After=assistant-core.service pipewire.service
+Wants=assistant-core.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/assistant
+# The venv is never "activated" under systemd, so put its bin/ on PATH for
+# any subprocess that expects to find its tools there. speaker.py resolves
+# piper explicitly and does not rely on this, but anything added later might.
+Environment=PATH=%h/assistant/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/assistant/.venv/bin/python -m audio.service
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+# Model loading takes ~20s on first start; do not let systemd think it hung.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

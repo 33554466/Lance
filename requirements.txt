@@ -1,0 +1,57 @@
+# Home AI Appliance — Python dependencies
+#
+# These are deliberately loose. Install, get the thing working, then
+# immediately run:
+#
+#     pip freeze > requirements.lock.txt
+#
+# and install from the lock file thereafter. An appliance that silently
+# changes behaviour because a transitive dependency shipped a new minor
+# version is an appliance you will be debugging at an inconvenient moment.
+
+# --- orchestrator ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# --- provider ---
+anthropic>=0.40
+
+# --- audio capture / playback ---
+sounddevice>=0.4.6
+numpy>=1.26,<3
+
+# --- wake word ---
+# openWakeWord is NOT listed here, and that is deliberate.
+#
+# It declares tflite-runtime as a hard dependency on Linux, but no
+# tflite-runtime wheels exist for Python 3.12 — which is exactly what
+# Ubuntu 24.04 ships. pip therefore fails the whole install.
+#
+# We only ever use openWakeWord's ONNX backend (see audio/listener.py,
+# inference_framework="onnx"), so tflite is dead weight. install.sh
+# installs it with --no-deps and its five real runtime dependencies are
+# listed here instead:
+onnxruntime>=1.17
+tqdm>=4.64
+scipy>=1.11
+scikit-learn>=1.3
+requests>=2.31
+
+# --- endpointing ---
+# Nothing to install. Silero VAD runs from the ONNX model that openWakeWord
+# already ships, driven through openwakeword.vad.VAD.
+#
+# The obvious choice — the `silero-vad` package — imports torchaudio at
+# module level, which drags in PyTorch. pip then resolves torchaudio from
+# PyPI (a CUDA build) even when torch came from the CPU index, and you get a
+# CPU torch beside a CUDA torchaudio that cannot find libcudart. Dropping
+# both saves ~200 MB and removes that failure mode entirely.
+
+# --- speech to text ---
+faster-whisper>=1.0.3
+
+# --- speech synthesis ---
+piper-tts>=1.2.0

@@ -1,0 +1,10 @@
+# ~/.config/systemd/user/assistant-watchdog.timer
+[Unit]
+Description=Run assistant health check every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,28 @@
+# ~/.config/systemd/user/assistant-ui.service
+#
+# Chromium in kiosk mode. Display only — it has no microphone permission
+# and no audio path, deliberately. All audio lives in Python.
+
+[Unit]
+Description=Assistant kiosk display
+After=assistant-core.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/chromium-browser \
+    --kiosk \
+    --app=http://127.0.0.1:8760 \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-features=TranslateUI \
+    --check-for-update-interval=31536000 \
+    --incognito
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
