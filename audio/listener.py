@@ -44,6 +44,10 @@ class Listener:
         self._audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
         self._vad_buf = np.zeros(0, dtype=np.float32)
         self._last_wake = 0.0
+        # Updated on every audio callback. The service watches this to
+        # notice a microphone that has stopped delivering audio — muted
+        # is fine (silence still streams), unplugged is not.
+        self.last_frame_ts = time.time()
         self._stream: sd.InputStream | None = None
 
         self._load_models(cfg, root)
@@ -55,9 +59,33 @@ class Listener:
         from openwakeword.model import Model as OWWModel
         from openwakeword.utils import download_models
 
-        download_models(model_names=[self.wake_name])
-        self.oww = OWWModel(wakeword_models=[self.wake_name],
-                            inference_framework="onnx")
+        # Two kinds of value are accepted here. A bare name like
+        # "hey_jarvis" is one of the bundled models and gets downloaded on
+        # first use. Anything ending in .onnx is a model YOU trained, loaded
+        # from disk — which is the only way to get a wake phrase that is not
+        # on openWakeWord's short list of pretrained options.
+        if str(self.wake_name).endswith(".onnx"):
+            path = Path(self.wake_name)
+            if not path.is_absolute():
+                path = root / path
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Custom wake word model not found at {path}. Train one "
+                    f"with openWakeWord's automatic_model_training notebook "
+                    f"and drop the .onnx file there."
+                )
+            self.oww = OWWModel(wakeword_models=[str(path)],
+                                inference_framework="onnx")
+            # openWakeWord keys its scores by the model's filename stem, not
+            # by whatever you called it in config.
+            self.wake_key = path.stem
+            log.info("custom wake word loaded from %s (key '%s')",
+                     path, self.wake_key)
+        else:
+            download_models(model_names=[self.wake_name])
+            self.oww = OWWModel(wakeword_models=[self.wake_name],
+                                inference_framework="onnx")
+            self.wake_key = self.wake_name
 
         # Silero VAD, via openWakeWord's ONNX wrapper rather than the
         # silero-vad package. That package imports torchaudio at module
@@ -90,6 +118,7 @@ class Listener:
         def callback(indata, frames, time_info, status):  # noqa: ARG001
             if status:
                 log.debug("input status: %s", status)
+            self.last_frame_ts = time.time()
             try:
                 self._audio_q.put_nowait(indata[:, 0].copy())
             except queue.Full:
@@ -133,7 +162,7 @@ class Listener:
         # openWakeWord wants int16
         pcm = (np.clip(frame, -1.0, 1.0) * 32767).astype(np.int16)
         scores = self.oww.predict(pcm)
-        score = float(scores.get(self.wake_name, 0.0))
+        score = float(scores.get(self.wake_key, 0.0))
 
         if score < self.threshold:
             return None
@@ -151,7 +180,9 @@ class Listener:
 
     # -- capture -----------------------------------------------------
 
-    def capture_utterance(self, start_timeout: float | None = None) -> np.ndarray:
+    def capture_utterance(self, start_timeout: float | None = None,
+                          silence_ms: float | None = None,
+                          max_seconds: float | None = None) -> np.ndarray:
         """Record until the speaker stops. Returns float32 mono at 16 kHz.
 
         start_timeout bounds how long we wait for speech to BEGIN. None means
@@ -159,6 +190,14 @@ class Listener:
         you asked for its attention, so it should be patient. A few seconds is
         right for a follow-up window, where silence means "I'm done".
         """
+        # Per-capture overrides exist for dictation: a person composing a
+        # sentence out loud pauses far longer than one asking a question, and
+        # a single global setting cannot serve both.
+        silence_frames = self.silence_frames if silence_ms is None else \
+            int(silence_ms / (VAD_FRAME / self.sr * 1000))
+        max_frames = self.max_frames if max_seconds is None else \
+            int(max_seconds * self.sr / VAD_FRAME)
+
         collected: list[np.ndarray] = []
         speech_frames = 0
         silence_run = 0
@@ -167,7 +206,7 @@ class Listener:
         self.vad.reset_states()
         started = time.time()
 
-        while total_frames < self.max_frames:
+        while total_frames < max_frames:
             try:
                 block = self._audio_q.get(timeout=1.0)
             except queue.Empty:
@@ -201,7 +240,7 @@ class Listener:
                 # Only start counting silence once we have heard something,
                 # so a slow start does not end the utterance before it begins.
                 if speech_frames >= self.min_speech_frames and \
-                        silence_run >= self.silence_frames:
+                        silence_run >= silence_frames:
                     log.info("endpoint after %.1fs (%d speech frames)",
                              time.time() - started, speech_frames)
                     return np.concatenate(collected) if collected else np.zeros(0, np.float32)

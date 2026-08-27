@@ -12,6 +12,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Window management runs from here, and needs to know which X display to
+# talk to. Harmless when there is no desktop — the tools detect that and
+# say so rather than failing obscurely.
+Environment=DISPLAY=:0
 Type=simple
 WorkingDirectory=%h/assistant
 EnvironmentFile=%h/assistant/.env

@@ -5,7 +5,7 @@
 
 identity:
   # What the assistant calls itself. Used in the system prompt.
-  name: "Ada"
+  name: "Lance"
   # The user's name, so it can address you.
   user: "Brendan"
 
@@ -33,6 +33,132 @@ provider:
   # tokens. Cuts input cost by roughly 90% on the cached portion.
   prompt_caching: true
 
+tools:
+  web_search:
+    # Anthropic runs the search server-side and hands the model the results.
+    # You write no integration and maintain no API key for it.
+    enabled: true
+    # Searches per reply. Three is enough for "what's the weather and will it
+    # rain tomorrow"; more mostly buys latency.
+    max_uses: 2
+    # Which model tiers carry the tool. NOT the small tier: server tools need
+    # a recent model, and a tier that cannot search would fail rather than
+    # answer. The router pushes anything that smells like a live-information
+    # question up to mid for exactly this reason.
+    tiers: ["mid", "top"]
+    # Optional. Use one or the other, never both.
+    # blocked_domains: ["pinterest.com"]
+    # allowed_domains: []
+
+reminders:
+  # Timers and reminders — the only thing here that speaks without being
+  # spoken to first. Stored in SQLite with absolute timestamps, so a restart,
+  # an update, or a crash costs you nothing: pending items reload and fire.
+  #
+  # The MODEL does the date arithmetic. It is told the current time in every
+  # request, so "in twenty minutes" and "tomorrow at seven" resolve upstream.
+  # That keeps daylight-saving bugs out of the appliance entirely.
+  #
+  #   curl -s localhost:8760/reminders | jq
+  enabled: true
+  max_pending: 50
+
+desktop:
+  # Window management, as a fixed vocabulary of verbs — never a shell.
+  #
+  # Every input here arrives through a wake word that occasionally misfires
+  # and a transcriber that occasionally mishears. `xdotool type` can drive
+  # any application including a terminal, so there is deliberately no tool
+  # for typing, clicking, closing windows, or running commands. What is here
+  # is what can be undone by saying the opposite.
+  #
+  # X11 only. Wayland stops one application moving another's windows on
+  # purpose; the tools say so rather than failing obscurely.
+  #   sudo apt install -y wmctrl xdotool
+  enabled: true
+  # Windows the assistant will refuse to minimise — its own display, so that
+  # "minimise everything" cannot blank the screen you watch it on.
+  protect: ["assistant", "lance"]
+  # ALSA card for volume. The assistant plays through the array, so the
+  # system default sink is the wrong device.
+  volume_card: "Array"
+  display: ":0"
+
+lists:
+  # Named lists. Add, remove, read, clear, and ask what is on all of them.
+  #   curl -s localhost:8760/lists | jq
+  #   curl -s localhost:8760/lists/work | jq
+  enabled: true
+  # Used when no list is named. "Add milk" should not need qualifying.
+  default: "shopping"
+  # Add a new list by adding it here. `say` is how the assistant refers to it
+  # out loud; `aliases` are the other things a person might actually SAY for
+  # it. Speech does not arrive with a dropdown attached — "put it on the
+  # honey-do list" and "add it to the house list" have to reach the same
+  # place, and the only way that happens is if you write both down.
+  #
+  # Getting this wrong fails SILENTLY: the item lands on a list nobody reads,
+  # which is the same as losing it. So be generous with aliases.
+  known:
+    shopping:
+      say: "shopping list"
+      aliases: ["groceries", "grocery", "store", "supermarket", "food"]
+    work:
+      say: "work list"
+      aliases: ["office", "job", "work todo", "work to do"]
+    house:
+      say: "house list"
+      aliases: ["home", "honey do", "honey-do", "chores", "around the house",
+                "household", "diy", "projects"]
+    kids:
+      say: "kids list"
+      aliases: ["children", "kid", "school", "family"]
+  # Allow creating a list that is not named above, when one is clearly asked
+  # for — "start a packing list". Set false to restrict to the list above.
+  allow_new: true
+
+memory:
+  # Durable facts, remembered across restarts and across months.
+  #
+  # These are injected into EVERY request, which is what makes them work and
+  # also what makes them expensive if abused: a wrong fact costs you on every
+  # exchange until removed. The system prompt tells the model to be strict
+  # about what earns a place here.
+  #
+  # Inspect or edit them directly whenever you like — it is just SQLite:
+  #   sqlite3 ~/assistant/data/assistant.db "SELECT id,category,text FROM memories;"
+  #   sqlite3 ~/assistant/data/assistant.db "DELETE FROM memories WHERE id=7;"
+  # or over HTTP:  curl -s localhost:8760/memories | jq
+  enabled: true
+  # Refuse to store more than this. Roughly 200 short facts is a few thousand
+  # tokens on every request — noticeable but not painful. Past that you want
+  # retrieval, not injection.
+  max_facts: 200
+
+documents:
+  # Plain text notes, written by the assistant on request. The Linux
+  # equivalent of "save this in Notepad".
+  enabled: true
+  # Everything is confined to this one directory, checked on every write
+  # after symlinks are resolved. Filenames are generated from a slugified
+  # title, never taken from the model, so a title cannot contain a path.
+  path: "~/Documents/Assistant"
+  # txt opens in Text Editor with no ceremony. Use md if you would rather
+  # have headings and lists render somewhere later.
+  format: "txt"
+  # Refuse anything longer. A runaway generation should not fill the disk.
+  max_chars: 20000
+
+location:
+  # Passed to the search tool so "near me", "tonight" and local business
+  # hours resolve correctly. It is a hint for the search engine, not
+  # tracking, and it never leaves the request. Set this to where the
+  # appliance actually lives.
+  city: ""
+  region: "Arizona"
+  country: "US"
+  timezone: "America/Phoenix"
+
 router:
   # Requests shorter than this many characters with no complexity
   # markers go to the small tier.
@@ -42,6 +168,38 @@ router:
     - "think hard"
     - "think carefully"
     - "take your time"
+  # Questions that need looking up. These are usually SHORT, so without this
+  # list they would fall through to the small tier — which does not carry the
+  # search tool. Matching any of these forces the mid tier.
+  live_info_markers:
+    - "weather"
+    - "forecast"
+    - "temperature"
+    - "rain"
+    - "snow"
+    - "news"
+    - "headline"
+    - "today"
+    - "tonight"
+    - "tomorrow"
+    - "this week"
+    - "right now"
+    - "currently"
+    - "latest"
+    - "recent"
+    - "current"
+    - "price"
+    - "cost of"
+    - "stock"
+    - "score"
+    - "who won"
+    - "open now"
+    - "still open"
+    - "hours"
+    - "near me"
+    - "traffic"
+    - "look up"
+    - "search"
   # Words that push a short request up to the mid tier anyway.
   complexity_markers:
     - "why"
@@ -58,6 +216,10 @@ context:
   # How many prior turns (user+assistant pairs) to send. Capping this is
   # what stops your input cost growing without bound over a long day.
   history_turns: 8
+  # A gap longer than this starts a fresh conversation rather than continuing
+  # the old one. Without it, coming back after three days makes the assistant
+  # reply to something you said on Tuesday as though you had just said it.
+  session_gap_minutes: 90
   # Characters of system prompt + persona. Kept small deliberately.
   system_prompt: |
     You are {name}, a voice assistant running on a dedicated appliance in
@@ -71,8 +233,86 @@ context:
     aloud as noise. Write numbers and units the way a person would say
     them. Spell out anything that would be mangled if read literally.
 
-    If you do not know something, say so in one short sentence rather than
-    guessing. If a request is ambiguous, ask one clarifying question.
+    You are located in {place}. When {user} says "here", "nearby", or
+    "tonight", that is what they mean.
+
+    You can search the web, and you should whenever a question depends on
+    current information — weather, news, prices, opening hours, sports,
+    anything that changed after your training.
+
+    When you are about to search, say one short sentence first — "Let me
+    check." or "One second." — and then search. This matters more than it
+    looks: a search takes several seconds, and everything you say is being
+    read out loud, so that sentence is the only thing standing between {user}
+    and silence. Say it before the search, never after.
+
+    Never read a web address out loud, and do not say "according to" followed
+    by a site name. The screen shows sources; your job is the answer. Give the
+    figure or the fact, and say how fresh it is only when that matters — "as
+    of this morning" for a price, nothing at all for a forecast.
+
+    You can set timers and reminders. Work out the absolute time yourself
+    from the timestamp in the message — "in twenty minutes", "at six", "next
+    Tuesday morning" — and pass it as ISO 8601 local time. Use kind 'timer'
+    for short countdowns and 'reminder' for anything tied to a clock time.
+    Confirm briefly: "Set, in twenty minutes." Never read the timestamp back.
+
+    You keep several lists for {user}: shopping, work, house, and kids. Add
+    items as they are mentioned, several at once when several are named.
+
+    Choose the list from what was said. "We need milk" is shopping; "remind
+    me to email the contractor" is work; "the gutters need clearing" is house.
+    If it is genuinely ambiguous, ask which list — one short question — rather
+    than guessing. An item filed on the wrong list is not wrong, it is lost,
+    because nobody will ever look there.
+
+    When reading a list back, say it as a person would — "milk, eggs, bread
+    and coffee" — never as a numbered list, and never read the list name back
+    to them when they just told you what it was.
+
+    You can arrange windows on the screen: list them, focus one, maximise,
+    restore, fullscreen, minimise, snap to the left or right half, centre, and
+    switch workspace. If it is unclear which window is meant, list them and
+    ask rather than guessing.
+
+    You cannot close windows, type, click, or run commands, and you should
+    say so plainly if asked — those are not missing by accident.
+
+    You can save notes and documents to {user}'s notes folder, and read them
+    back. Use save_note whenever they ask you to write something down, take
+    a note, draft something, or make a list — do it without asking permission
+    first, since asking wastes a turn on something they already requested.
+
+    What you WRITE and what you SAY are different. The note is read on a
+    screen, so give it line breaks, headings and structure. Your spoken reply
+    is just the confirmation: say what you called it and roughly how long it
+    is, in one sentence. Never read a saved note back aloud unless asked.
+
+    You remember things across conversations. Anything under "What you know
+    about this household" was learned earlier and is still true unless {user}
+    says otherwise.
+
+    Use remember when {user} asks you to, and when they mention a stable fact
+    about themselves, their household, or how they like things done. Write it
+    as one self-contained sentence that will still make sense read cold in a
+    year. Say that you have noted it, briefly, and move on — do not read the
+    fact back verbatim.
+
+    Be strict about what you store. Remembered facts go into every future
+    conversation, so a wrong one is wrong forever, and a useless one costs
+    something on every exchange. Do not store one-off task details, anything
+    that will be untrue next week, passing moods, or anything sensitive like
+    passwords, card numbers or medical specifics unless directly asked to.
+
+    If {user} corrects something you remembered, forget the old fact and
+    remember the new one. Do not leave both.
+
+    Use recall to search past conversations when they refer to something from
+    before that is not in what you already know.
+
+    If you do not know something and cannot look it up, say so in one short
+    sentence rather than guessing. If a request is ambiguous, ask one
+    clarifying question.
 
     After you answer, the microphone stays open for a few seconds, so {user}
     can follow up without saying the wake word again. Offering a follow-up is
@@ -131,13 +371,38 @@ audio:
   # the XMOS to fully discharge; three is cheap insurance.
   usb_power_off_seconds: 3
 
+  # If no audio frames arrive for this long, the microphone is gone —
+  # unplugged, switched off, or wedged — and the service exits so systemd can
+  # restart it into the device recovery loop. That makes an unplug, a power
+  # switch and a warm-reboot wedge all self-healing.
+  #
+  # Note this does NOT fire when you press the array's mute button: a muted
+  # array still streams silence, which is exactly the distinction we want.
+  # Set to 0 to disable.
+  stall_timeout_seconds: 15
+
   sample_rate: 16000
   frame_ms: 80             # 1280 samples at 16 kHz
 
 wake_word:
-  # openWakeWord model. The bundled options are: alexa, hey_jarvis,
-  # hey_mycroft, hey_rhasspy, ok_nabu, timer, weather.
-  # Train your own at https://github.com/dscripka/openWakeWord
+  # Either a BUNDLED model name, downloaded automatically on first use:
+  #     alexa, hey_jarvis, hey_mycroft, hey_rhasspy, ok_nabu, timer, weather
+  # or a PATH to a .onnx model you trained yourself, relative to this file:
+  #     models/wake/you_there_lance.onnx
+  #
+  # There is no third option. The wake phrase is a trained neural network,
+  # not a string match — you cannot simply type a new phrase here and have
+  # it work. Custom phrases mean training a model, which takes about an hour
+  # in openWakeWord's automatic_model_training Colab notebook and needs no
+  # recordings of your own voice: it synthesises thousands of examples with
+  # text to speech.
+  #
+  # Choosing a phrase, in rough order of importance:
+  #   * Three or more syllables. Short phrases false-trigger constantly.
+  #   * Uncommon in ordinary speech. This is why "hey Jarvis" works and
+  #     "computer" does not — you say the second one by accident.
+  #   * Distinct consonants. Phrases that blur into a vowel are harder for
+  #     a small model to pin down than ones with hard stops in them.
   model: "hey_jarvis"
   # Detection threshold. START HERE when tuning. Higher = fewer false
   # positives and more missed wakes. Log every trigger for a week and
@@ -171,7 +436,7 @@ stt:
 tts:
   engine: "piper"
   # Path is resolved by scripts/fetch_models.sh
-  voice: "models/piper/en_US-lessac-medium.onnx"
+  voice: "models/piper/en_GB-semaine-medium.onnx"
   # Speaking rate. 1.0 is the model default; lower is slower.
   length_scale: 1.0
 
@@ -192,6 +457,99 @@ behaviour:
   # should not be offering follow-ups, because you would not be able to give
   # one. See context.system_prompt.
   follow_up_seconds: 8
+
+  # Silence cover for slow replies. A web search adds several seconds during
+  # which the model emits nothing, and silence from a voice assistant is
+  # indistinguishable from failure — you repeat yourself, which makes it
+  # worse. If nothing has been spoken by this point, say something short.
+  #
+  # The system prompt also asks the model to speak before searching, which is
+  # the nicer version of the same fix. This is the backstop for when it
+  # doesn't. Set to 0 to disable.
+  filler_after_seconds: 2.5
+  # Saying any of these ends the conversation immediately: playback stops,
+  # any reply still being generated is abandoned, the follow-up window
+  # closes, and the device goes back to waiting for the wake word.
+  #
+  # This is handled entirely in the audio process and never touches the
+  # network, so it works instantly, and it works even when the API is slow
+  # or down — which is exactly when you most want to be able to shut it up.
+  #
+  # Matching is EXACT after lowercasing and stripping punctuation. That is
+  # deliberate: substring matching would end the conversation when you said
+  # "stop by the store on the way home". If you want a phrase to work, put
+  # the whole phrase here.
+  stop_phrases:
+    - "stop"
+    - "cancel"
+    - "quiet"
+    - "never mind"
+    - "nevermind"
+    - "forget it"
+    - "thats all"
+    - "that's all"
+    - "that is all"
+    - "im done"
+    - "i'm done"
+    - "were done"
+    - "we're done"
+    - "go to sleep"
+    - "go back to sleep"
+    - "nothing else"
+    - "no thank you"
+    - "no thanks"
+    - "thank you thats all"
+    - "thank you that's all"
+  # Play a rising three-tone when a timer or reminder fires. Longer and more
+  # insistent than the wake chime, because it has to cut through a running
+  # tap and a conversation — but deliberately not an alarm clock.
+  reminder_chime: true
+
+  # Saying any of these switches to patient endpointing for exactly ONE
+  # utterance, then reverts. Composing a sentence out loud involves much
+  # longer pauses than asking a question, and one global setting cannot
+  # serve both without making the other feel broken.
+  dictation_phrases:
+    - "take this down"
+    - "take a letter"
+    - "take dictation"
+    - "write this down"
+    - "let me dictate"
+    - "dictation"
+  # Trailing silence allowed while dictating, and the hard cap.
+  dictation_silence_ms: 1800
+  dictation_max_seconds: 120
+
+  # Repeat the last reply. Answered entirely in the audio process — no API
+  # call, no latency, no cost, and it still works with the network down.
+  repeat_phrases:
+    - "say that again"
+    - "repeat that"
+    - "repeat"
+    - "what did you say"
+    - "come again"
+    - "one more time"
+  # Same, but slower — for phone numbers, addresses, and anything you are
+  # writing down while it talks.
+  repeat_slow_phrases:
+    - "say that again slowly"
+    - "repeat that slowly"
+    - "slower"
+    - "say it slower"
+    - "more slowly"
+  slow_length_scale: 1.4
+
+  # Play a short falling two-tone when dismissed. Rising means awake, falling
+  # means asleep — the direction carries the meaning without explanation.
+  stop_chime: true
+
+  # Rotated in order, never random — hearing the same three words every time
+  # is worse than the pause it covers.
+  filler_phrases:
+    - "Let me look that up."
+    - "One moment."
+    - "Checking now."
+    - "Give me a second."
 
 storage:
   db_path: "data/assistant.db"

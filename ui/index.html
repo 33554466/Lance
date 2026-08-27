@@ -54,6 +54,79 @@
   }
   #reply::-webkit-scrollbar { width: 0; }
 
+  /* Deliberately quiet. Sources are reference, not content — legible from
+     across the room only if you go looking for them. */
+  #sources {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem;
+    margin-top: 1rem; font-size: 1.1rem; opacity: 0.45;
+  }
+  #sources:empty { display: none; }
+  .src-label { text-transform: uppercase; letter-spacing: 0.12em;
+               font-size: 0.85rem; opacity: 0.7; }
+  .src { padding: 0.15rem 0.6rem; border: 1px solid currentColor;
+         border-radius: 999px; opacity: 0.9; }
+
+
+  /* ---------- board (lists + reminders) ----------
+     Read from across a room, not from a desk chair. Columns rather than one
+     long scroll, because a list you have to scroll is a list you stop
+     checking. Nothing animates: this can be on screen for hours. */
+  #board {
+    flex: 1; display: none; flex-direction: column;
+    padding: 3rem 4rem 2rem; gap: 2rem; overflow: hidden;
+  }
+  body.board-on #board { display: flex; }
+  body.board-on #ambient, body.board-on #convo { display: none !important; }
+
+  #board-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 2rem; border-bottom: 1px solid #30363d; padding-bottom: 1rem;
+    flex-shrink: 0;
+  }
+  #board-title { font-size: 2rem; font-weight: 300; letter-spacing: -0.01em; }
+  #board-clock {
+    font-size: 2rem; font-weight: 300; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  #board-cols {
+    flex: 1; display: grid; gap: 1.5rem; overflow: hidden;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    align-content: start;
+  }
+  .card {
+    background: var(--panel); border-radius: 0.75rem; padding: 1.4rem 1.6rem;
+    display: flex; flex-direction: column; gap: 0.9rem; min-height: 0;
+    overflow: hidden;
+  }
+  .card-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 0.75rem; flex-shrink: 0;
+  }
+  .card-title {
+    font-size: 1.15rem; font-weight: 500; letter-spacing: 0.02em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .card-count {
+    font-size: 1rem; color: var(--dim); font-variant-numeric: tabular-nums;
+  }
+  .card ul { list-style: none; display: flex; flex-direction: column;
+             gap: 0.55rem; overflow-y: auto; min-height: 0; }
+  .card ul::-webkit-scrollbar { width: 0; }
+  .card li { font-size: 1.5rem; font-weight: 300; line-height: 1.25; }
+  .card li::before { content: "· "; color: var(--dim); }
+  .card.rem li::before { content: ""; }
+  .card.rem .when {
+    display: block; font-size: 1rem; color: var(--think); margin-top: 0.1rem;
+  }
+  .empty { font-size: 1.3rem; color: var(--dim); font-weight: 300; }
+
+  #board-foot {
+    display: flex; gap: 2rem; color: var(--dim); font-size: 0.95rem;
+    border-top: 1px solid #30363d; padding-top: 0.9rem; flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
   /* ---------- status bar ---------- */
   #bar {
     display: flex; align-items: center; gap: 1rem;
@@ -109,6 +182,20 @@
   <div id="convo">
     <div id="heard"></div>
     <div id="reply"></div>
+    <!-- Sources appear only when the model actually cited something. The
+         spoken reply never reads a URL aloud, so this is where that half of
+         the answer lives. -->
+    <div id="sources"></div>
+  </div>
+
+
+  <div id="board">
+    <div id="board-head">
+      <div id="board-title">Lists</div>
+      <div id="board-clock"></div>
+    </div>
+    <div id="board-cols"></div>
+    <div id="board-foot"></div>
   </div>
 
   <input id="typed" placeholder="Type a question, Enter to send, Esc to dismiss"
@@ -179,6 +266,140 @@
   }
 
   // ---------- socket ----------
+  // Sources are built with textContent, never innerHTML. The titles come
+  // from web pages the model chose, which makes them untrusted input, and a
+  // kiosk browser is the last place you want to render someone else's markup.
+  function renderSources(list) {
+    const box = $("sources");
+    box.textContent = "";
+    if (!list || !list.length) return;
+    const label = document.createElement("span");
+    label.className = "src-label";
+    label.textContent = list.length === 1 ? "Source" : "Sources";
+    box.appendChild(label);
+    list.slice(0, 5).forEach(s => {
+      const item = document.createElement("span");
+      item.className = "src";
+      let host = s.url;
+      try { host = new URL(s.url).hostname.replace(/^www\./, ""); } catch (e) {}
+      item.textContent = host;
+      item.title = s.title || s.url;
+      box.appendChild(item);
+    });
+  }
+
+
+  // ---------- board ----------
+  // Two modes from one file: /dashboard pins it on permanently, and a voice
+  // request shows it for a while over the conversation view. Sharing the
+  // renderer means there is only ever one thing to keep correct.
+  const BOARD_PINNED = new URLSearchParams(location.search).has("board")
+                       || location.pathname.startsWith("/dashboard");
+  const BOARD_SECONDS = 90;
+  let boardTimer = null, boardPoll = null;
+
+  async function loadBoard() {
+    try {
+      const r = await fetch("/board", { cache: "no-store" });
+      renderBoard(await r.json());
+    } catch (e) {
+      // A failed refresh leaves the last good render up, which is the right
+      // behaviour for a screen on a wall: stale beats blank.
+    }
+  }
+
+  function renderBoard(d) {
+    $("board-clock").textContent = new Date().toLocaleTimeString([], {
+      hour: "numeric", minute: "2-digit" });
+    const cols = $("board-cols");
+    cols.textContent = "";
+
+    if (d.reminders && d.reminders.length) {
+      cols.appendChild(card("Reminders", d.reminders.map(r => ({
+        text: r.text, sub: r.when })), true));
+    }
+    (d.lists || []).forEach(l => {
+      cols.appendChild(card(l.title, (l.items || []).map(t => ({ text: t }))));
+    });
+    if (!cols.children.length) {
+      const p = document.createElement("div");
+      p.className = "empty";
+      p.textContent = "Nothing on any list.";
+      cols.appendChild(p);
+    }
+
+    const foot = $("board-foot");
+    foot.textContent = "";
+    [`${d.name} · ${d.audio_ok ? "listening" : "microphone offline"}`,
+     `24h spend $${(d.spend_24h_usd ?? 0).toFixed(3)}`].forEach(t => {
+      const s = document.createElement("span"); s.textContent = t;
+      foot.appendChild(s);
+    });
+  }
+
+  // Built with textContent throughout — list items are things people said
+  // out loud and were transcribed, so they are untrusted text, and this
+  // browser is running in kiosk mode with nobody watching it.
+  function card(title, items, isRem) {
+    const el = document.createElement("div");
+    el.className = "card" + (isRem ? " rem" : "");
+    const head = document.createElement("div");
+    head.className = "card-head";
+    const h = document.createElement("div");
+    h.className = "card-title"; h.textContent = title;
+    const c = document.createElement("div");
+    c.className = "card-count"; c.textContent = items.length || "";
+    head.append(h, c); el.appendChild(head);
+
+    if (!items.length) {
+      const p = document.createElement("div");
+      p.className = "empty"; p.textContent = "empty";
+      el.appendChild(p);
+    } else {
+      const ul = document.createElement("ul");
+      items.forEach(it => {
+        const li = document.createElement("li");
+        li.textContent = it.text;
+        if (it.sub) {
+          const w = document.createElement("span");
+          w.className = "when"; w.textContent = it.sub;
+          li.appendChild(w);
+        }
+        ul.appendChild(li);
+      });
+      el.appendChild(ul);
+    }
+    return el;
+  }
+
+  function showBoard(seconds) {
+    document.body.classList.add("board-on");
+    loadBoard();
+    clearInterval(boardPoll);
+    boardPoll = setInterval(loadBoard, 15000);
+    clearTimeout(boardTimer);
+    if (!BOARD_PINNED && seconds) {
+      boardTimer = setTimeout(hideBoard, seconds * 1000);
+    }
+  }
+
+  function hideBoard() {
+    if (BOARD_PINNED) return;
+    document.body.classList.remove("board-on");
+    clearInterval(boardPoll); boardPoll = null;
+    clearTimeout(boardTimer); boardTimer = null;
+  }
+
+  if (BOARD_PINNED) showBoard();
+
+  // B toggles it by hand; Escape dismisses.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "b" || e.key === "B") {
+      document.body.classList.contains("board-on")
+        ? hideBoard() : showBoard(BOARD_SECONDS);
+    } else if (e.key === "Escape") hideBoard();
+  });
+
   function connect() {
     ws = new WebSocket(`ws://${location.host}/ws/display`);
 
@@ -194,10 +415,15 @@
         case "state":
           setState(m.state, m.detail);
           break;
+        case "show_board":
+          showBoard(BOARD_SECONDS);
+          break;
         case "transcript":
+          hideBoard();
           showConvo();
           $("heard").textContent = m.text;
           $("reply").textContent = "";
+          $("sources").textContent = "";
           break;
         case "response_delta":
           showConvo();
@@ -206,6 +432,7 @@
           break;
         case "response_done":
           if (m.error) setState("error");
+          renderSources(m.sources);
           scheduleIdle();
           break;
         case "barge_in":

@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -224,6 +225,18 @@ def ensure_capture_works(cfg: dict) -> bool:
     return False
 
 
+_PUNCT = str.maketrans("", "", ".,!?;:\"'’")
+
+
+def normalise(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace.
+
+    Whisper punctuates and capitalises freely — "Stop." and "stop" and
+    "Stop!" are all the same intent and must all match.
+    """
+    return " ".join(text.lower().translate(_PUNCT).split())
+
+
 class AudioService:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -253,6 +266,48 @@ class AudioService:
         self.barge_in = b.get("barge_in", True)
         self.mute_while_speaking = b.get("mute_while_speaking", True)
         self.follow_up_seconds = float(b.get("follow_up_seconds", 0))
+
+        # Dismissal is handled here, in the audio process, and never reaches
+        # the network. "Stop" that takes two seconds and a round trip to a
+        # data centre is not stopping. This costs nothing and always works,
+        # including when the API is down or the reply is halfway through.
+        #
+        # Matching is EXACT after normalisation, deliberately. Substring
+        # matching would make "stop by the store on the way home" end the
+        # conversation, and a dismissal that fires when you did not mean it
+        # is far more annoying than one you have to repeat.
+        self.stop_phrases = {
+            normalise(p) for p in b.get("stop_phrases", []) if p.strip()
+        }
+        self.stop_chime = b.get("stop_chime", True)
+
+        # Dictation. A person composing a sentence out loud pauses far
+        # longer than one asking a question, so a single endpoint setting
+        # cannot serve both. These phrases switch to patient endpointing for
+        # exactly one utterance, then it reverts.
+        self.dictation_phrases = {
+            normalise(p) for p in b.get("dictation_phrases", []) if p.strip()
+        }
+        self.dictation_silence_ms = float(b.get("dictation_silence_ms", 1800))
+        self.dictation_max_seconds = float(b.get("dictation_max_seconds", 120))
+
+        # Repeat. Answered from the last reply already in memory: no API
+        # call, no latency, no cost, and it works with the network down.
+        self.repeat_phrases = {
+            normalise(p) for p in b.get("repeat_phrases", []) if p.strip()
+        }
+        self.repeat_slow_phrases = {
+            normalise(p) for p in b.get("repeat_slow_phrases", []) if p.strip()
+        }
+        self.slow_length_scale = float(b.get("slow_length_scale", 1.4))
+        self._last_reply: list[str] = []
+        self._reply_building: list[str] = []
+
+        # A microphone that stops delivering frames is unplugged, wedged, or
+        # gone. Muting does NOT trigger this — a muted array still streams
+        # silence, which is exactly the distinction we want.
+        self.stall_timeout = float(
+            cfg["audio"].get("stall_timeout_seconds", 15))
         self._reply_done = threading.Event()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ws = None
@@ -287,6 +342,20 @@ class AudioService:
 
         while True:
             try:
+                # --- microphone stall watchdog ---------------------------
+                # Exit rather than sit here deaf. systemd restarts us, and
+                # ensure_capture_works() then waits patiently for the device
+                # to come back — so an unplug, a switch, or a wedged array
+                # all recover on their own without anyone typing anything.
+                since = time.time() - self.listener.last_frame_ts
+                if self.stall_timeout > 0 and since > self.stall_timeout:
+                    log.error(
+                        "no audio for %.0fs — the microphone has stopped "
+                        "delivering frames. Exiting so systemd can restart "
+                        "into device recovery.", since)
+                    import os
+                    os._exit(1)
+
                 speaking = self.speaker.is_speaking
 
                 # While the assistant is talking we either ignore the mic
@@ -329,6 +398,71 @@ class AudioService:
 
                     self.send({"type": "state", "state": "transcribing"})
                     text = self.listener.transcribe(audio)
+
+                    norm = normalise(text) if text else ""
+
+                    # "Say that again" — answered here, from memory. Never
+                    # reaches the network, so it is instant and free, and it
+                    # still works when the API is down.
+                    if norm and (norm in self.repeat_phrases
+                                 or norm in self.repeat_slow_phrases):
+                        slow = norm in self.repeat_slow_phrases
+                        if self._last_reply:
+                            log.info("repeating last reply%s",
+                                     " slowly" if slow else "")
+                            for sentence in self._last_reply:
+                                self.speaker.say(
+                                    sentence,
+                                    length_scale=(self.slow_length_scale
+                                                  if slow else None))
+                        else:
+                            self.speaker.say("I have not said anything yet.")
+                        self.speaker.wait_until_idle(timeout=90)
+                        self.listener.drain()
+                        follow_up = True
+                        continue
+
+                    # "Take this down" — switch to patient endpointing for
+                    # the next utterance only.
+                    if norm and norm in self.dictation_phrases:
+                        log.info("dictation mode for one utterance")
+                        self.speaker.say("Go ahead.")
+                        self.speaker.wait_until_idle(timeout=30)
+                        self.listener.drain()
+                        self.send({"type": "state", "state": "listening"})
+                        audio = self.listener.capture_utterance(
+                            silence_ms=self.dictation_silence_ms,
+                            max_seconds=self.dictation_max_seconds,
+                        )
+                        self.send({"type": "state", "state": "transcribing"})
+                        dictated = self.listener.transcribe(audio)
+                        if not dictated:
+                            self.speaker.say("I did not catch anything.")
+                            self.send({"type": "state", "state": "idle"})
+                            break
+                        self.send({"type": "transcript", "text": dictated,
+                                   "wake_score": -1.0, "mode": "dictation"})
+                        if not self._reply_done.wait(timeout=180):
+                            break
+                        if not self.speaker.wait_until_idle(timeout=180):
+                            break
+                        self.listener.drain()
+                        follow_up = True
+                        continue
+
+                    # Check for dismissal before anything else looks at this.
+                    if text and norm in self.stop_phrases:
+                        log.info("dismissed by phrase: %r", text)
+                        self.speaker.stop()          # cut playback now
+                        self.send({"type": "cancel"})  # abandon any generation
+                        if self.stop_chime:
+                            play_chime(
+                                device=self.cfg["audio"].get("output_device"),
+                                kind="sleep",
+                            )
+                        self.listener.drain()
+                        self.send({"type": "state", "state": "idle"})
+                        break
 
                     if not text:
                         if follow_up:
@@ -382,10 +516,20 @@ class AudioService:
             msg = json.loads(raw)
             kind = msg.get("type")
             if kind == "speak":
-                self.speaker.say(msg.get("text", ""))
+                text = msg.get("text", "")
+                self._reply_building.append(text)
+                self.speaker.say(text)
+            elif kind == "chime":
+                play_chime(device=self.cfg["audio"].get("output_device"),
+                           kind=msg.get("kind", "wake"))
             elif kind == "stop_speaking":
                 self.speaker.stop()
             elif kind == "speak_done":
+                # Snapshot what was just said, so "say that again" has
+                # something to repeat.
+                if self._reply_building:
+                    self._last_reply = self._reply_building
+                    self._reply_building = []
                 # The orchestrator has queued the last sentence. Playback may
                 # still be draining — the follow-up window waits for that too.
                 self._reply_done.set()

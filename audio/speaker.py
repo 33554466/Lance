@@ -87,7 +87,7 @@ class Speaker:
             log.info("output device wants %d Hz, voice is %d Hz — resampling",
                      self.out_rate, self.sample_rate)
 
-        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._speaking = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -123,10 +123,15 @@ class Speaker:
 
     # -- public ------------------------------------------------------
 
-    def say(self, text: str) -> None:
-        """Queue a sentence. Returns immediately."""
+    def say(self, text: str, length_scale: float | None = None) -> None:
+        """Queue a sentence. Returns immediately.
+
+        length_scale overrides the speaking rate for this sentence only —
+        higher is slower. Used by "say that again, slowly", which is the
+        difference between hearing a phone number and writing it down.
+        """
         if text.strip():
-            self._queue.put(text.strip())
+            self._queue.put((text.strip(), length_scale))
 
     def stop(self) -> None:
         """Barge-in: drop everything queued and cut the current utterance."""
@@ -169,21 +174,23 @@ class Speaker:
             item = self._queue.get()
             if item is None:
                 return
+            text, scale = item if isinstance(item, tuple) else (item, None)
             self._stop.clear()
             try:
-                self._speak_one(item)
+                self._speak_one(text, scale)
             except Exception:  # noqa: BLE001
                 log.exception("TTS failure on: %.60s", item)
             finally:
                 self._speaking.clear()
 
-    def _speak_one(self, text: str) -> None:
+    def _speak_one(self, text: str,
+                   length_scale: float | None = None) -> None:
         self._speaking.set()
         proc = subprocess.Popen(
             [
                 self.piper_bin,
                 "--model", str(self.voice),
-                "--length_scale", str(self.length_scale),
+                "--length_scale", str(length_scale or self.length_scale),
                 "--output-raw",
             ],
             stdin=subprocess.PIPE,
@@ -227,12 +234,17 @@ class Speaker:
             stream.close()
 
 
-def play_chime(sample_rate: int = 16000, device=None) -> None:
+def play_chime(sample_rate: int = 16000, device=None, kind: str = "wake") -> None:
     """A short two-tone acknowledgement, synthesised rather than shipped as
     a file. It fires the instant the wake word is detected, before
     transcription begins — which is the point. It tells you the device heard
     you, so you do not repeat yourself into a system that was already
-    listening."""
+    listening.
+
+    Two shapes, and the direction carries the meaning without anyone having
+    to be told: "wake" rises, "sleep" falls. A falling pair is the sound of
+    something closing, which is exactly what dismissing the assistant is.
+    """
     try:
         def tone(freq: float, ms: int) -> np.ndarray:
             n = int(sample_rate * ms / 1000)
@@ -246,7 +258,16 @@ def play_chime(sample_rate: int = 16000, device=None) -> None:
             env[-fade:] = np.linspace(1, 0, fade)
             return (wave * env * 0.25).astype(np.float32)
 
-        sig = np.concatenate([tone(880, 60), tone(1320, 70)])
+        if kind == "sleep":
+            sig = np.concatenate([tone(1320, 60), tone(660, 90)])
+        elif kind == "alert":
+            # Three rising notes. A timer must cut through a running tap and
+            # a conversation, so it is longer and more insistent than the
+            # wake chime without being an alarm clock.
+            sig = np.concatenate([tone(660, 110), tone(880, 110),
+                                  tone(1180, 190)])
+        else:
+            sig = np.concatenate([tone(880, 60), tone(1320, 70)])
         sd.play(sig, samplerate=sample_rate, device=device, blocking=True)
     except Exception:  # noqa: BLE001
         log.debug("chime failed", exc_info=True)

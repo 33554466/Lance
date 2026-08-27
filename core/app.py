@@ -22,8 +22,10 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .context import ContextBuilder
 from .db import Store
-from .provider import Reply, build_provider
+from .provider import Reply, build_provider, web_search_tool
 from .router import Router
+from .scheduler import Scheduler
+from .tools import build_tools
 
 ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("assistant.core")
@@ -78,9 +80,19 @@ app = FastAPI(title="Home AI Appliance")
 hub = Hub()
 store = Store(ROOT / cfg["storage"]["db_path"])
 router = Router(cfg)
-ctx = ContextBuilder(cfg, store)
+# Local tools run on this machine. The toolbox needs the store for memory;
+# the context builder needs the toolbox to inject remembered facts.
+local_tools = build_tools(cfg, store)
+ctx = ContextBuilder(cfg, store, local_tools)
+scheduler = Scheduler(store, hub, cfg)
 _provider = None          # built lazily so the app starts without a key
 _busy = asyncio.Lock()
+_filler_n = 0             # rotates the "one moment" phrases
+
+# Set when the user dismisses the assistant mid-reply. The audio service has
+# already stopped the speaker by the time this arrives — this is what stops
+# us generating (and paying for) the rest of an answer nobody is listening to.
+_cancel = asyncio.Event()
 
 
 def provider():
@@ -92,8 +104,23 @@ def provider():
 
 # ---------------------------------------------------------------- routes
 
+@app.on_event("startup")
+async def _startup():
+    # Timers must survive a restart, so the scheduler reloads pending items
+    # from SQLite rather than holding them in memory. Starting it here means
+    # a reminder set before an update still fires after it.
+    scheduler.start()
+
+
 @app.get("/")
 async def index():
+    return FileResponse(ROOT / "ui" / "index.html")
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """The kiosk page in board mode. Same file, so there is only ever one
+    stylesheet and one renderer to keep correct."""
     return FileResponse(ROOT / "ui" / "index.html")
 
 
@@ -121,6 +148,93 @@ async def wake_stats(hours: int = 24):
         s["score_median"] = round(scores[len(scores) // 2], 3)
         s["score_max"] = round(scores[-1], 3)
     return JSONResponse(s)
+
+
+@app.get("/reminders")
+async def reminders():
+    """Pending timers and reminders, for a glance from the terminal."""
+    from .scheduler import describe_when
+    rows = store.pending_reminders()
+    return JSONResponse({
+        "count": len(rows),
+        "pending": [
+            {"id": r["id"], "kind": r["kind"], "text": r["text"],
+             "when": describe_when(r["due"]),
+             "due": time.strftime("%Y-%m-%d %H:%M",
+                                  time.localtime(r["due"]))}
+            for r in rows
+        ],
+    })
+
+
+@app.get("/board")
+async def board():
+    """Everything the dashboard shows, in one request.
+
+    One endpoint rather than four because the screen refreshes on a timer:
+    four requests every fifteen seconds is four chances for a partial
+    render, and a dashboard that shows lists from now and reminders from a
+    minute ago is worse than one that is briefly stale in a consistent way.
+    """
+    from .scheduler import describe_when
+    counts = store.list_counts()
+    known = (cfg.get("lists", {}) or {}).get("known", {}) or {}
+    return JSONResponse({
+        "name": cfg["identity"]["name"],
+        "lists": [
+            {
+                "key": n,
+                "title": (known.get(n, {}) or {}).get("say", f"{n} list"),
+                "items": [r["text"] for r in store.list_read(n)],
+            }
+            for n, c in counts if c
+        ],
+        "reminders": [
+            {"kind": r["kind"], "text": r["text"],
+             "when": describe_when(r["due"])}
+            for r in store.pending_reminders()
+        ],
+        "spend_24h_usd": round(store.spend_since(time.time() - 86400), 4),
+        "audio_ok": len(hub.audio) > 0,
+    })
+
+
+@app.get("/lists")
+async def all_lists():
+    """Every list with something on it. A glance at the whole household."""
+    counts = store.list_counts()
+    return JSONResponse({
+        "lists": [
+            {"list": n, "count": c, "items": [r["text"] for r in store.list_read(n)]}
+            for n, c in counts
+        ],
+    })
+
+
+@app.get("/lists/{name}")
+async def show_list(name: str = "shopping"):
+    rows = store.list_read(name)
+    return JSONResponse({"list": name, "count": len(rows),
+                         "items": [r["text"] for r in rows]})
+
+
+@app.get("/memories")
+async def memories():
+    """Everything the assistant currently remembers, so you can audit it.
+
+    Worth reading occasionally. Memory that nobody inspects is memory that
+    quietly accumulates something wrong.
+    """
+    rows = store.list_memories()
+    return JSONResponse({
+        "count": len(rows),
+        "memories": [
+            {"id": r["id"], "category": r["category"], "text": r["text"],
+             "updated": time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(r["updated"]))}
+            for r in rows
+        ],
+    })
 
 
 @app.websocket("/ws/display")
@@ -176,10 +290,16 @@ async def ws_audio(ws: WebSocket):
                     log.info("empty transcript after wake — ignoring")
                     await hub.broadcast_state("idle")
                     continue
-                asyncio.create_task(handle_utterance(text))
+                mode = msg.get("mode")
+                asyncio.create_task(handle_utterance(text, mode=mode))
 
             elif kind == "state":
                 await hub.to_display(msg)
+
+            elif kind == "cancel":
+                log.info("dismissed — abandoning any reply in flight")
+                _cancel.set()
+                await hub.to_display({"type": "cancelled"})
 
             elif kind == "barge_in":
                 log.info("barge-in")
@@ -194,9 +314,20 @@ async def ws_audio(ws: WebSocket):
 
 # ------------------------------------------------------------- pipeline
 
-async def handle_utterance(text: str) -> None:
+async def handle_utterance(text: str, mode: str | None = None) -> None:
     if not text.strip():
         return
+
+    # Dictation arrives already transcribed with patient endpointing. The
+    # model needs to know it is transcribing rather than conversing, or it
+    # will helpfully summarise what you just spent a minute dictating.
+    if mode == "dictation":
+        text = (
+            "I just dictated the following. Save it as a note using my own "
+            "words — tidy up obvious speech errors and add sensible "
+            "paragraphs, but do not summarise or rewrite it. Then confirm in "
+            "one short sentence.\n\n" + text
+        )
 
     if _busy.locked():
         # A second utterance while one is in flight. Interrupt rather than
@@ -205,6 +336,7 @@ async def handle_utterance(text: str) -> None:
         await hub.to_audio({"type": "stop_speaking"})
 
     async with _busy:
+        _cancel.clear()
         await hub.to_display({"type": "transcript", "text": text})
         route = router.route(text)
         log.info("routed to %s (%s): %s", route.tier, route.reason, text[:60])
@@ -214,9 +346,55 @@ async def handle_utterance(text: str) -> None:
         messages = ctx.build(text)
         reply = Reply(tier=route.tier)
 
+        # Attach the web-search tool only where it is both supported and
+        # wanted. Two reasons this is not simply always on: each search costs
+        # about a cent, roughly thirty times a plain question; and the small
+        # tier may not support server tools at all, which would turn "what
+        # time is it" into an API error.
+        tools = []
+        ws = cfg.get("tools", {}).get("web_search", {})
+        if ws.get("enabled") and route.tier in ws.get("tiers", ["mid", "top"]):
+            tools.append(web_search_tool(cfg))
+        # Local tools go on every tier. They cost nothing per call and
+        # "write that down" is exactly the kind of short request the small
+        # tier handles.
+        tools.extend(local_tools.schemas())
+        tools = tools or None
+
         await hub.broadcast_state("speaking")
         buffer = ""
         spoken_any = False
+
+        # ---- filling the gap -------------------------------------------
+        # A web search adds several seconds during which the model produces
+        # nothing at all, and silence from a voice assistant is
+        # indistinguishable from failure — you repeat yourself, which makes
+        # it worse. If nothing has been spoken by the time the filler
+        # threshold passes, say something short so the device is audibly
+        # alive. The model's own reply then follows normally.
+        t0 = time.monotonic()
+        timings: dict = {}
+        filler_cfg = cfg.get("behaviour", {})
+        filler_after = float(filler_cfg.get("filler_after_seconds", 1.2))
+        fillers = filler_cfg.get("filler_phrases") or ["One moment."]
+
+        async def maybe_filler() -> None:
+            try:
+                await asyncio.sleep(filler_after)
+            except asyncio.CancelledError:
+                return
+            if spoken_any or _cancel.is_set():
+                return
+            # Rotate deterministically. Hearing the same three words every
+            # time is worse than the pause it covers.
+            global _filler_n
+            phrase = fillers[_filler_n % len(fillers)]
+            _filler_n += 1
+            timings["filler"] = time.monotonic() - t0
+            await hub.to_audio({"type": "speak", "text": phrase})
+
+        filler_task = (asyncio.create_task(maybe_filler())
+                       if tools and filler_after > 0 else None)
 
         try:
             stream = provider().stream_reply(
@@ -225,8 +403,16 @@ async def handle_utterance(text: str) -> None:
                 model=route.model,
                 max_tokens=cfg["provider"]["max_tokens"],
                 reply=reply,
+                tools=tools,
+                executor=local_tools,
             )
             async for chunk in stream:
+                if _cancel.is_set():
+                    log.info("cancelled mid-stream after %.1fs",
+                             time.monotonic() - t0)
+                    buffer = ""       # do not speak the tail
+                    break
+                timings.setdefault("first_token", time.monotonic() - t0)
                 await hub.to_display({"type": "response_delta", "text": chunk})
                 buffer += chunk
                 # Emit complete sentences as they form.
@@ -237,11 +423,14 @@ async def handle_utterance(text: str) -> None:
                             await hub.to_audio({
                                 "type": "speak", "text": sentence.strip()
                             })
+                            timings.setdefault("first_speech",
+                                               time.monotonic() - t0)
                             spoken_any = True
                     buffer = parts[-1]
 
             if buffer.strip():
                 await hub.to_audio({"type": "speak", "text": buffer.strip()})
+                timings.setdefault("first_speech", time.monotonic() - t0)
                 spoken_any = True
 
         except Exception as exc:  # noqa: BLE001
@@ -253,8 +442,26 @@ async def handle_utterance(text: str) -> None:
                     "text": "Something went wrong on my end.",
                 })
 
+        if filler_task:
+            filler_task.cancel()
+
+        # Where the time actually went. Read this before tuning anything —
+        # "it feels slow" is not a measurement, and the fix for a slow search
+        # is nothing like the fix for slow generation.
+        log.info(
+            "timing first_token=%.2fs first_speech=%.2fs total=%.2fs%s",
+            timings.get("first_token", -1),
+            timings.get("first_speech", -1),
+            time.monotonic() - t0,
+            f" filler_at={timings['filler']:.2f}s" if "filler" in timings else "",
+        )
+
         await hub.to_audio({"type": "speak_done"})
-        await hub.to_display({"type": "response_done", "error": reply.error})
+        # Sources go to the screen only. They are what the display is for:
+        # carrying the part of an answer that does not survive being read out.
+        await hub.to_display({"type": "response_done", "error": reply.error,
+                              "sources": reply.sources,
+                              "tools": reply.tool_calls})
 
         if reply.text:
             store.add_message("assistant", reply.text,
@@ -262,11 +469,22 @@ async def handle_utterance(text: str) -> None:
         if reply.usage:
             store.add_usage(reply.model, route.tier, reply.usage, reply.cost_usd)
             log.info(
-                "usage in=%d cached=%d out=%d cost=$%.5f",
+                "usage in=%d cached=%d out=%d searches=%d cost=$%.5f",
                 reply.usage.get("input_tokens", 0),
                 reply.usage.get("cache_read_input_tokens", 0),
                 reply.usage.get("output_tokens", 0),
+                reply.usage.get("web_search_requests", 0),
                 reply.cost_usd,
             )
+        if reply.tool_calls:
+            log.info("tools used: %s", ", ".join(reply.tool_calls))
+            # Anything that touched a list, or an explicit request to show
+            # them, puts the board on screen. Saying six items out loud is
+            # tedious; showing them and saying "six things" is better.
+            if any(c in ("show_board", "list_add", "list_remove",
+                         "list_read", "list_clear", "list_all",
+                         "set_reminder", "cancel_reminder", "list_reminders")
+                   for c in reply.tool_calls):
+                await hub.to_display({"type": "show_board"})
 
         await hub.broadcast_state("idle")

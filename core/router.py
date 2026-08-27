@@ -26,6 +26,15 @@ class Router:
         self.small_max_chars = r.get("small_max_chars", 80)
         self.escalate = [p.lower() for p in r.get("escalate_phrases", [])]
         self.markers = [m.lower() for m in r.get("complexity_markers", [])]
+        # Requests that need to look something up. These are usually SHORT —
+        # "what's the weather", "who won" — so the length heuristic alone
+        # would send them to the small tier, which may not carry the web
+        # search tool. Anything matching here skips that shortcut.
+        self.live = [m.lower() for m in r.get("live_info_markers", [])]
+
+    def needs_live_info(self, text: str) -> bool:
+        t = text.lower()
+        return any(m in t for m in self.live)
 
     def route(self, text: str) -> Route:
         t = text.lower().strip()
@@ -37,6 +46,11 @@ class Router:
             if phrase in t:
                 return Route("top", self.models["top"],
                              f"escalated by phrase: '{phrase}'")
+
+        if self.needs_live_info(t):
+            hit = next(m for m in self.live if m in t)
+            return Route("mid", self.models["mid"],
+                         f"needs current information: '{hit}'")
 
         has_marker = any(m in t for m in self.markers)
 
