@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .env
 *.wav
+config.yaml.bak
+config.yaml.broken
+*.bak
