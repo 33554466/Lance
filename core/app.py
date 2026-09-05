@@ -104,12 +104,50 @@ def provider():
 
 # ---------------------------------------------------------------- routes
 
+async def _backfill_loop():
+    """Embed history in the background, slowly and out of the way.
+
+    A first run against months of conversation is thousands of embeddings. Done
+    at startup it would leave the assistant deaf for a minute after every
+    update, which is a bad trade for a feature nobody is using in that minute.
+
+    So: small batches, a sleep between them, and a long sleep once there is
+    nothing left. `embeddings_missing` returns newest first, so even a run that
+    never finishes has indexed the half you are most likely to ask about.
+    """
+    sem = (cfg.get("memory", {}) or {}).get("semantic", {}) or {}
+    if not sem.get("enabled", False):
+        return
+    batch = int(sem.get("backfill_batch", 32))
+    gap = float(sem.get("backfill_gap_seconds", 2.0))
+    idle = float(sem.get("backfill_idle_seconds", 300.0))
+
+    # Vectors from a different model are not comparable to these ones, so a
+    # model change means a re-index rather than a silently mixed space.
+    dropped = store.embeddings_drop_other_models(local_tools.embedder.model_name)
+    if dropped:
+        log.info("embedding model changed — dropped %d stale vectors", dropped)
+
+    await asyncio.sleep(10)   # let the audio service settle first
+    while True:
+        try:
+            done = sum(local_tools.index.backfill(k, batch)
+                       for k in ("memory", "message"))
+        except Exception:  # noqa: BLE001
+            log.exception("backfill failed — continuing")
+            done = 0
+        if done:
+            log.info("indexed %d", done)
+        await asyncio.sleep(gap if done else idle)
+
+
 @app.on_event("startup")
 async def _startup():
     # Timers must survive a restart, so the scheduler reloads pending items
     # from SQLite rather than holding them in memory. Starting it here means
     # a reminder set before an update still fires after it.
     scheduler.start()
+    asyncio.create_task(_backfill_loop())
 
 
 @app.get("/")
@@ -177,18 +215,30 @@ async def board():
     minute ago is worse than one that is briefly stale in a consistent way.
     """
     from .scheduler import describe_when
-    counts = store.list_counts()
     known = (cfg.get("lists", {}) or {}).get("known", {}) or {}
+    # Every configured board, even empty ones — an empty board on screen is
+    # information ("nothing on army"), whereas a missing card just looks like
+    # something broke. Ad-hoc lists appear only when they have something on
+    # them.
+    names = list(known) + [n for n, _ in store.list_counts()
+                           if n not in known]
+    midnight = time.time() - (time.time() % 86400)
+    boards = []
+    for n in names:
+        rows = store.list_read(n, include_done=True)
+        if not rows and n not in known:
+            continue
+        boards.append({
+            "key": n,
+            "title": (known.get(n, {}) or {}).get("say", f"{n} list"),
+            "items": [r["text"] for r in rows if not r["done"]],
+            "done": [r["text"] for r in rows if r["done"]],
+        })
     return JSONResponse({
         "name": cfg["identity"]["name"],
-        "lists": [
-            {
-                "key": n,
-                "title": (known.get(n, {}) or {}).get("say", f"{n} list"),
-                "items": [r["text"] for r in store.list_read(n)],
-            }
-            for n, c in counts if c
-        ],
+        "open_total": sum(len(b["items"]) for b in boards),
+        "done_today": store.done_since(midnight),
+        "lists": boards,
         "reminders": [
             {"kind": r["kind"], "text": r["text"],
              "when": describe_when(r["due"])}
@@ -197,6 +247,64 @@ async def board():
         "spend_24h_usd": round(store.spend_since(time.time() - 86400), 4),
         "audio_ok": len(hub.audio) > 0,
     })
+
+
+@app.get("/case")
+async def case():
+    """The active investigation, shaped for the screen.
+
+    `sla_due` goes out as an absolute epoch rather than "two hours left", so
+    the browser can count down every second against a number that does not go
+    stale between the fifteen-second polls. A deadline that only updates four
+    times a minute reads as broken on a screen you are watching.
+    """
+    row = store.case_active()
+    if not row:
+        return JSONResponse({"active": False})
+
+    sides: dict[str, list] = {"investigation": [], "admin": []}
+    for s in store.case_steps(row["id"]):
+        sides.setdefault(s["side"], []).append({
+            "phase": s["phase"], "text": s["text"],
+            "done": bool(s["done"]), "finding": s["finding"],
+        })
+    prog = store.case_progress(row["id"])
+    return JSONResponse({
+        "active": True,
+        "id": row["id"],
+        "kind": row["kind"],
+        "title": row["title"],
+        "ref": row["ref"],
+        "severity": row["severity"],
+        "opened": row["opened"],
+        "sla_due": row["sla_due"],
+        "now": time.time(),          # lets the page correct for clock skew
+        "done_total": sum(d for d, _ in prog.values()),
+        "step_total": sum(t for _, t in prog.values()),
+        "sides": sides,
+        "notes": row["notes"],
+        "open_cases": len(store.cases_open()),
+    })
+
+
+@app.get("/cases")
+async def cases():
+    """Open cases, for a glance from the terminal."""
+    out = []
+    for r in store.cases_open():
+        prog = store.case_progress(r["id"])
+        out.append({
+            "id": r["id"], "kind": r["kind"], "title": r["title"],
+            "ref": r["ref"], "severity": r["severity"],
+            "done": sum(d for d, _ in prog.values()),
+            "total": sum(t for _, t in prog.values()),
+            "sla_due": (time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(r["sla_due"]))
+                        if r["sla_due"] else None),
+            "sla_seconds_left": (round(r["sla_due"] - time.time())
+                                 if r["sla_due"] else None),
+        })
+    return JSONResponse({"count": len(out), "cases": out})
 
 
 @app.get("/lists")
@@ -216,6 +324,16 @@ async def show_list(name: str = "shopping"):
     rows = store.list_read(name)
     return JSONResponse({"list": name, "count": len(rows),
                          "items": [r["text"] for r in rows]})
+
+
+@app.get("/memory/index")
+async def memory_index():
+    """How much of the history is searchable by meaning yet."""
+    try:
+        return JSONResponse(local_tools.index.stats())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"},
+                            status_code=500)
 
 
 @app.get("/memories")
@@ -486,5 +604,14 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
                          "set_reminder", "cancel_reminder", "list_reminders")
                    for c in reply.tool_calls):
                 await hub.to_display({"type": "show_board"})
+            # Anything that touched the case redraws the checklist. Ticking a
+            # step off and not seeing it go grey is the kind of small silence
+            # that makes you stop trusting the screen.
+            if any(c in ("start_case", "check_step", "uncheck_step",
+                         "case_status", "case_next", "case_note", "show_case")
+                   for c in reply.tool_calls):
+                await hub.to_display({"type": "show_case"})
+            if "close_case" in reply.tool_calls:
+                await hub.to_display({"type": "hide_case"})
 
         await hub.broadcast_state("idle")

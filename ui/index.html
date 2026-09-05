@@ -84,6 +84,12 @@
     flex-shrink: 0;
   }
   #board-title { font-size: 2rem; font-weight: 300; letter-spacing: -0.01em; }
+  #board-stats { display: flex; gap: 2rem; margin-left: auto; margin-right: 2rem; }
+  .bstat { display: flex; align-items: baseline; gap: 0.4rem; }
+  .bstat b { font-size: 1.8rem; font-weight: 400;
+             font-variant-numeric: tabular-nums; }
+  .bstat span { font-size: 0.85rem; color: var(--dim);
+                text-transform: uppercase; letter-spacing: 0.1em; }
   #board-clock {
     font-size: 2rem; font-weight: 300; color: var(--dim);
     font-variant-numeric: tabular-nums;
@@ -115,6 +121,12 @@
   .card ul::-webkit-scrollbar { width: 0; }
   .card li { font-size: 1.5rem; font-weight: 300; line-height: 1.25; }
   .card li::before { content: "· "; color: var(--dim); }
+  /* Completed work stays on the board rather than vanishing — seeing what
+     you got through is half the point of having one. Dimmed hard so it
+     never competes with what is still outstanding. */
+  .card li.done { opacity: 0.35; text-decoration: line-through; }
+  .card li.done::before { content: "✓ "; text-decoration: none; }
+  .card.empty-board { opacity: 0.5; }
   .card.rem li::before { content: ""; }
   .card.rem .when {
     display: block; font-size: 1rem; color: var(--think); margin-top: 0.1rem;
@@ -126,6 +138,111 @@
     border-top: 1px solid #30363d; padding-top: 0.9rem; flex-shrink: 0;
     font-variant-numeric: tabular-nums;
   }
+
+  /* ---------- case (investigation checklist) ----------
+     Read at a desk, not across a room, so the type is smaller and denser than
+     the board. This is a working document you glance at forty times an hour
+     while doing something else, and every row you have to scroll to is a row
+     you stop checking. Two columns, each scrolling on its own. */
+  #case {
+    flex: 1; display: none; flex-direction: column;
+    padding: 2rem 2.5rem 1rem; gap: 1.25rem; overflow: hidden;
+  }
+  body.case-on #case { display: flex; }
+  body.case-on #ambient,
+  body.case-on #convo,
+  body.case-on #board { display: none !important; }
+
+  #case-head {
+    display: flex; align-items: center; gap: 1.25rem;
+    border-bottom: 1px solid #30363d; padding-bottom: 0.9rem; flex-shrink: 0;
+  }
+  #case-title { font-size: 1.6rem; font-weight: 400; letter-spacing: -0.01em; }
+  .chip {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 0.2rem 0.6rem; border: 1px solid currentColor;
+    border-radius: 999px; color: var(--dim); white-space: nowrap;
+  }
+  .chip.sev { color: var(--think); }
+  #case-spacer { margin-left: auto; }
+  #case-prog {
+    font-size: 1.1rem; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  /* The countdown is the whole reason this screen exists, so it is the
+     largest thing on it and it changes colour rather than needing to be
+     read carefully. */
+  #case-clock {
+    font-size: 2.6rem; font-weight: 300; font-variant-numeric: tabular-nums;
+    line-height: 1; color: var(--live);
+  }
+  #case-clock.warn { color: var(--think); }
+  #case-clock.late { color: var(--error); }
+  #case-clock small {
+    display: block; font-size: 0.72rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--dim); margin-top: 0.3rem;
+    font-weight: 400;
+  }
+
+  #case-cols {
+    flex: 1; display: grid; gap: 1.5rem; min-height: 0;
+    grid-template-columns: 1fr 1fr;
+  }
+  .case-col {
+    background: var(--panel); border-radius: 0.75rem; padding: 1.1rem 1.3rem;
+    display: flex; flex-direction: column; gap: 0.7rem; min-height: 0;
+  }
+  .case-col > h2 {
+    font-size: 0.9rem; font-weight: 500; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--accent);
+    display: flex; justify-content: space-between; align-items: baseline;
+    flex-shrink: 0;
+  }
+  .case-col > h2 em {
+    font-style: normal; color: var(--dim); font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+  }
+  .bar { height: 3px; border-radius: 2px; background: #30363d; flex-shrink: 0; }
+  .bar i { display: block; height: 100%; border-radius: 2px;
+           background: var(--accent); transition: width 0.3s ease; }
+  .steps { list-style: none; overflow-y: auto; min-height: 0;
+           display: flex; flex-direction: column; gap: 0.1rem; }
+  .steps::-webkit-scrollbar { width: 0; }
+  .phase {
+    font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--dim); margin: 0.85rem 0 0.35rem;
+  }
+  .phase:first-child { margin-top: 0; }
+  .step {
+    display: flex; gap: 0.6rem; align-items: baseline;
+    font-size: 1.05rem; font-weight: 300; line-height: 1.35;
+    padding: 0.2rem 0;
+  }
+  .step .box { color: var(--dim); flex-shrink: 0; font-size: 0.95rem; }
+  .step.done .box { color: var(--live); }
+  /* Dim and strike the LABEL only, never the whole step. text-decoration
+     inherits down into descendants and cannot be switched off from inside,
+     so a line-through on the row draws straight through the finding too —
+     which is the one line on a completed step you still want to read. */
+  .step.done .label { opacity: 0.32; text-decoration: line-through; }
+  /* What he found, hanging off the step it belongs to. This is the part that
+     turns the write-up at the end into transcription rather than recall, so
+     it stays legible after the step is ticked. */
+  .step .found {
+    display: block; font-size: 0.9rem; color: var(--think);
+    margin-top: 0.15rem; opacity: 0.85;
+  }
+  /* The step you are on. */
+  .step.next .label { color: var(--text); font-weight: 400; }
+  .step.next .box { color: var(--accent); }
+
+  #case-foot {
+    display: flex; gap: 1.5rem; align-items: baseline; color: var(--dim);
+    font-size: 0.95rem; border-top: 1px solid #30363d; padding-top: 0.75rem;
+    flex-shrink: 0; min-height: 1.4rem;
+  }
+  #case-said { color: var(--text); opacity: 0.75;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ---------- status bar ---------- */
   #bar {
@@ -191,11 +308,25 @@
 
   <div id="board">
     <div id="board-head">
-      <div id="board-title">Lists</div>
+      <div id="board-title">Boards</div>
+      <div id="board-stats"></div>
       <div id="board-clock"></div>
     </div>
     <div id="board-cols"></div>
     <div id="board-foot"></div>
+  </div>
+
+  <div id="case">
+    <div id="case-head">
+      <div id="case-title">Case</div>
+      <div class="chip" id="case-ref" hidden></div>
+      <div class="chip sev" id="case-sev" hidden></div>
+      <div id="case-spacer"></div>
+      <div id="case-prog"></div>
+      <div id="case-clock">--:--<small>sla</small></div>
+    </div>
+    <div id="case-cols"></div>
+    <div id="case-foot"><span id="case-said"></span></div>
   </div>
 
   <input id="typed" placeholder="Type a question, Enter to send, Esc to dismiss"
@@ -252,11 +383,17 @@
   }
 
   function setState(state, detail) {
-    // Preserve the cursor class — className assignment would wipe it, and
-    // the cursor would flicker back on every state change.
-    const cursorHidden = body.classList.contains("hide-cursor");
-    body.className = "state-" + state;
-    if (cursorHidden) body.classList.add("hide-cursor");
+    // Remove ONLY the state-* class. Assigning body.className wholesale
+    // destroys every other class on the element, which is a bug that keeps
+    // coming back wearing different clothes: first it ate hide-cursor, and
+    // then it silently ate board-on — showBoard() added the class, the
+    // websocket connected, the server sent its opening "idle" state, and the
+    // fully-rendered board vanished behind display:none a moment later.
+    // Preserving one class by name fixes one symptom; this fixes the cause.
+    Array.from(body.classList)
+      .filter((c) => c.startsWith("state-"))
+      .forEach((c) => body.classList.remove(c));
+    body.classList.add("state-" + state);
     $("status").textContent = LABELS[state] || state;
     $("status").classList.toggle(
       "pulse", ["listening", "transcribing", "thinking"].includes(state)
@@ -314,17 +451,29 @@
     const cols = $("board-cols");
     cols.textContent = "";
 
+    const stats = $("board-stats");
+    stats.textContent = "";
+    [[d.open_total ?? 0, "open"], [d.done_today ?? 0, "done today"]]
+      .forEach(([n, label]) => {
+        const w = document.createElement("div"); w.className = "bstat";
+        const b = document.createElement("b"); b.textContent = n;
+        const s = document.createElement("span"); s.textContent = label;
+        w.append(b, s); stats.appendChild(w);
+      });
+
     if (d.reminders && d.reminders.length) {
       cols.appendChild(card("Reminders", d.reminders.map(r => ({
         text: r.text, sub: r.when })), true));
     }
     (d.lists || []).forEach(l => {
-      cols.appendChild(card(l.title, (l.items || []).map(t => ({ text: t }))));
+      const items = (l.items || []).map(t => ({ text: t }))
+        .concat((l.done || []).map(t => ({ text: t, done: true })));
+      cols.appendChild(card(l.title, items));
     });
     if (!cols.children.length) {
       const p = document.createElement("div");
       p.className = "empty";
-      p.textContent = "Nothing on any list.";
+      p.textContent = "Nothing on any board.";
       cols.appendChild(p);
     }
 
@@ -341,24 +490,27 @@
   // out loud and were transcribed, so they are untrusted text, and this
   // browser is running in kiosk mode with nobody watching it.
   function card(title, items, isRem) {
+    const openCount = items.filter(i => !i.done).length;
     const el = document.createElement("div");
-    el.className = "card" + (isRem ? " rem" : "");
+    el.className = "card" + (isRem ? " rem" : "")
+                 + (openCount ? "" : " empty-board");
     const head = document.createElement("div");
     head.className = "card-head";
     const h = document.createElement("div");
     h.className = "card-title"; h.textContent = title;
     const c = document.createElement("div");
-    c.className = "card-count"; c.textContent = items.length || "";
+    c.className = "card-count"; c.textContent = openCount || "";
     head.append(h, c); el.appendChild(head);
 
     if (!items.length) {
       const p = document.createElement("div");
-      p.className = "empty"; p.textContent = "empty";
+      p.className = "empty"; p.textContent = "clear";
       el.appendChild(p);
     } else {
       const ul = document.createElement("ul");
       items.forEach(it => {
         const li = document.createElement("li");
+        if (it.done) li.className = "done";
         li.textContent = it.text;
         if (it.sub) {
           const w = document.createElement("span");
@@ -373,6 +525,9 @@
   }
 
   function showBoard(seconds) {
+    // The case overlay sits on top of the board, so it has to step aside
+    // rather than the board quietly rendering underneath it.
+    hideCase();
     document.body.classList.add("board-on");
     loadBoard();
     clearInterval(boardPoll);
@@ -388,16 +543,220 @@
     document.body.classList.remove("board-on");
     clearInterval(boardPoll); boardPoll = null;
     clearTimeout(boardTimer); boardTimer = null;
+    // Asking for the shopping list mid-investigation should not cost you the
+    // checklist. The board has its ninety seconds and then the case comes
+    // back, because the case is the thing with a deadline on it.
+    if (caseData) showCase();
   }
+
+  // NB: the pinned dashboard is started at the bottom of the case section,
+  // not here. showBoard() now stands the case overlay down, and hideCase()
+  // touches `casePoll`, which is declared below — calling it from up here
+  // hits the temporal dead zone and the whole script dies on /dashboard.
+
+
+  // ---------- case ----------
+  // Unlike the board, this does NOT time out. An investigation checklist that
+  // vanishes after ninety seconds is a checklist you have to keep asking for,
+  // and asking for it is exactly the friction the whole feature exists to
+  // remove. It goes up when a case opens and stays up until the case closes.
+  let caseData = null, casePoll = null, caseTick = null, caseSkew = 0;
+  let caseLastDone = -1;
+
+  async function loadCase() {
+    try {
+      const r = await fetch("/case", { cache: "no-store" });
+      const d = await r.json();
+      if (!d.active) { endCase(); return; }
+      // The server tells us its own clock. Counting down against an absolute
+      // deadline using a browser clock that is a minute out would put the
+      // wrong number on the wall, and this is the one number on this screen
+      // somebody is actually relying on.
+      if (d.now) caseSkew = d.now - Date.now() / 1000;
+      caseData = d;
+      renderCase(d);
+      showCase();
+    } catch (e) {
+      // Keep the last good render. Stale beats blank on a wall display.
+    }
+  }
+
+  function fmtLeft(secs) {
+    const late = secs < 0;
+    let s = Math.floor(Math.abs(secs));
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    const body = h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    return (late ? "+" : "") + body;
+  }
+
+  function paintClock() {
+    if (!caseData) return;
+    const el = $("case-clock");
+    if (!caseData.sla_due) {
+      el.textContent = "—";
+      el.className = "";
+      const lbl = document.createElement("small");
+      lbl.textContent = "no sla"; el.appendChild(lbl);
+      return;
+    }
+    const now = Date.now() / 1000 + caseSkew;
+    const left = caseData.sla_due - now;
+    const span = Math.max(1, caseData.sla_due - caseData.opened);
+    const gone = 1 - left / span;
+
+    el.textContent = fmtLeft(left);
+    el.className = left < 0 ? "late" : (gone >= 0.75 ? "warn" : "");
+    const lbl = document.createElement("small");
+    lbl.textContent = left < 0 ? "sla breached" : "sla remaining";
+    el.appendChild(lbl);
+  }
+
+  function renderCase(d) {
+    $("case-title").textContent = d.title || "Case";
+    const ref = $("case-ref");
+    ref.hidden = !d.ref; ref.textContent = d.ref || "";
+    const sev = $("case-sev");
+    sev.hidden = !d.severity; sev.textContent = d.severity || "";
+    $("case-prog").textContent = `${d.done_total}/${d.step_total}`;
+    paintClock();
+
+    const cols = $("case-cols");
+    cols.textContent = "";
+    [["investigation", "Investigation"], ["admin", "My tasks"]]
+      .forEach(([key, label]) => {
+        cols.appendChild(caseColumn(label, (d.sides || {})[key] || []));
+      });
+
+    // Keep the step you are on in view. Only when something was actually
+    // ticked — scrolling on every fifteen-second poll would yank the column
+    // back under you while you were reading further down it.
+    if (d.done_total !== caseLastDone) {
+      caseLastDone = d.done_total;
+      requestAnimationFrame(() => {
+        cols.querySelectorAll(".step.next").forEach((el) =>
+          el.scrollIntoView({ block: "center", behavior: "smooth" }));
+      });
+    }
+  }
+
+  // textContent throughout. Step text comes from a YAML file, but findings
+  // are transcribed speech, and this browser runs in kiosk mode with nobody
+  // watching it.
+  function caseColumn(label, steps) {
+    const done = steps.filter(s => s.done).length;
+    const col = document.createElement("div");
+    col.className = "case-col";
+
+    const h = document.createElement("h2");
+    h.textContent = label;
+    const n = document.createElement("em");
+    n.textContent = `${done}/${steps.length}`;
+    h.appendChild(n);
+    col.appendChild(h);
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    fill.style.width = steps.length
+      ? `${Math.round((done / steps.length) * 100)}%` : "0%";
+    bar.appendChild(fill);
+    col.appendChild(bar);
+
+    const ul = document.createElement("ul");
+    ul.className = "steps";
+    // A column with one phase does not need a phase heading — it would just
+    // restate the column title one line below itself.
+    const multiPhase = new Set(steps.map(s => s.phase || "")).size > 1;
+    let phase = null, markedNext = false;
+    steps.forEach((s) => {
+      if (multiPhase && s.phase && s.phase !== phase) {
+        phase = s.phase;
+        const p = document.createElement("li");
+        p.className = "phase"; p.textContent = phase;
+        ul.appendChild(p);
+      }
+      const li = document.createElement("li");
+      li.className = "step" + (s.done ? " done" : "");
+      if (!s.done && !markedNext) { li.classList.add("next"); markedNext = true; }
+
+      const box = document.createElement("span");
+      box.className = "box"; box.textContent = s.done ? "✓" : "○";
+      const txt = document.createElement("span");
+      txt.className = "txt";
+      const label = document.createElement("span");
+      label.className = "label"; label.textContent = s.text;
+      txt.appendChild(label);
+      if (s.finding) {
+        const f = document.createElement("span");
+        f.className = "found"; f.textContent = s.finding;
+        txt.appendChild(f);
+      }
+      li.append(box, txt);
+      ul.appendChild(li);
+    });
+    if (!steps.length) {
+      const p = document.createElement("li");
+      p.className = "phase"; p.textContent = "nothing here";
+      ul.appendChild(p);
+    }
+    col.appendChild(ul);
+    return col;
+  }
+
+  function showCase() {
+    document.body.classList.add("case-on");
+    // Tear the board down directly rather than through hideBoard(), which
+    // no-ops on the pinned dashboard. Leaving board-on set would be invisible
+    // — the CSS puts the case on top either way — while quietly keeping a
+    // /board poll running for the rest of the day.
+    document.body.classList.remove("board-on");
+    clearInterval(boardPoll); boardPoll = null;
+    clearTimeout(boardTimer); boardTimer = null;
+    clearInterval(casePoll);
+    casePoll = setInterval(loadCase, 15000);
+    // The countdown ticks locally every second. Polling alone would move it
+    // in fifteen-second jumps, which looks like a frozen clock.
+    clearInterval(caseTick);
+    caseTick = setInterval(paintClock, 1000);
+  }
+
+  function hideCase() {
+    document.body.classList.remove("case-on");
+    clearInterval(casePoll); casePoll = null;
+    clearInterval(caseTick); caseTick = null;
+  }
+
+  // The case is over. Drop the data as well as the classes, or hideBoard()
+  // will helpfully resurrect a checklist for a finished investigation. On the
+  // pinned dashboard the boards come back, which is where that screen lives
+  // when nothing is being investigated.
+  function endCase() {
+    caseData = null;
+    caseLastDone = -1;
+    hideCase();
+    if (BOARD_PINNED) showBoard();
+  }
+
+  function caseOn() { return document.body.classList.contains("case-on"); }
 
   if (BOARD_PINNED) showBoard();
 
-  // B toggles it by hand; Escape dismisses.
+  // Come back up mid-investigation — after a reboot, an update, the USB
+  // wedge — and the checklist is already on screen. The case outlived the
+  // process, so the display should too. This runs after showBoard() so an
+  // open case wins the screen on the dashboard as well.
+  loadCase();
+
+  // B toggles the board; C the case; Escape dismisses whichever is up.
   document.addEventListener("keydown", (e) => {
     if (e.key === "b" || e.key === "B") {
       document.body.classList.contains("board-on")
         ? hideBoard() : showBoard(BOARD_SECONDS);
-    } else if (e.key === "Escape") hideBoard();
+    } else if (e.key === "c" || e.key === "C") {
+      caseOn() ? hideCase() : loadCase();
+    } else if (e.key === "Escape") { hideBoard(); hideCase(); }
   });
 
   function connect() {
@@ -418,8 +777,25 @@
         case "show_board":
           showBoard(BOARD_SECONDS);
           break;
+        case "show_case":
+          loadCase();
+          break;
+        case "hide_case":
+          endCase();
+          break;
+        case "sla":
+          // Warnings land in the footer strip rather than taking the screen.
+          // The countdown is already the largest thing on it; a modal would
+          // hide the checklist at the exact moment it matters most.
+          $("case-said").textContent = m.text;
+          break;
         case "transcript":
           hideBoard();
+          // Mid-investigation the checklist stays put and the conversation
+          // shrinks to one line at the bottom. Swapping a 28-step checklist
+          // out for one sentence, every time you speak, is how a screen
+          // becomes something you stop looking at.
+          if (caseOn()) { $("case-said").textContent = m.text; break; }
           showConvo();
           $("heard").textContent = m.text;
           $("reply").textContent = "";
@@ -433,6 +809,10 @@
         case "response_done":
           if (m.error) setState("error");
           renderSources(m.sources);
+          // The reply accumulated into #reply as usual — it is just hidden
+          // under the checklist. Surface the finished sentence in the strip
+          // so there is still a record of what was said back.
+          if (caseOn()) $("case-said").textContent = $("reply").textContent;
           scheduleIdle();
           break;
         case "barge_in":

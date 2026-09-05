@@ -41,6 +41,16 @@ TICK_SECONDS = 1.0
 # has passed and announcing it is noise rather than help.
 GRACE_SECONDS = 30 * 60
 
+# How late an SLA warning may be and still be worth saying. A marker whose
+# moment passed while the service was restarting has been claimed either way —
+# the row goes in so it can never fire twice — but announcing "halfway through
+# your SLA" two hours after halfway is misinformation, not a warning.
+#
+# Breach gets a longer window than the interim markers because it is the one
+# you would still want to hear about late.
+SLA_STALE_SECONDS = 10 * 60
+SLA_STALE_BREACH_SECONDS = 60 * 60
+
 
 def _phrase_for(row, now: float) -> str:
     """What the assistant actually says when this fires."""
@@ -68,10 +78,13 @@ class Scheduler:
     """Polls for due reminders and announces them through the hub."""
 
     def __init__(self, store, hub, cfg: dict):
+        from .casework import Sla
         self.store = store
         self.hub = hub
         self.cfg = cfg
         self.chime = bool(cfg.get("behaviour", {}).get("reminder_chime", True))
+        self.cases_on = bool((cfg.get("casework", {}) or {}).get("enabled", False))
+        self.sla = Sla(cfg)
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -94,6 +107,61 @@ class Scheduler:
             await asyncio.sleep(TICK_SECONDS)
 
     async def _tick(self) -> None:
+        await self._reminder_tick()
+        if self.cases_on:
+            await self._sla_tick()
+
+    async def _sla_tick(self) -> None:
+        """Speak up as an investigation's deadline approaches.
+
+        The deadline is absolute and lives in SQLite, so it survives a restart
+        with the clock intact — which matters, because the SLA belongs to
+        whoever wrote it and kept running while we were down.
+        """
+        now = time.time()
+        for case in self.store.cases_open():
+            if not case["sla_due"]:
+                continue
+
+            speak: tuple[str, str] | None = None
+            for marker, at, phrase in self.sla.markers(case["opened"],
+                                                       case["sla_due"]):
+                if now < at:
+                    continue
+                # Claim it whether or not we end up speaking. An unclaimed
+                # past marker is true on every subsequent tick, and the
+                # scheduler ticks once a second.
+                if not self.store.case_alert_once(case["id"], marker):
+                    continue
+                limit = (SLA_STALE_BREACH_SECONDS if marker == "breach"
+                         else SLA_STALE_SECONDS)
+                if now - at > limit:
+                    log.info("case %d: %s marker passed while down — not "
+                             "announcing", case["id"], marker)
+                    continue
+                # In normal running only one marker comes due per tick. Several
+                # at once means we were down across them, and reading the whole
+                # backlog out — "halfway through", then "75 percent through",
+                # then the breach — tells him nothing the last one does not.
+                speak = (marker, phrase)
+
+            if not speak:
+                continue
+            marker, phrase = speak
+            said = f"{case['title']}. {phrase}"
+            log.info("case %d SLA: %s", case["id"], phrase)
+            await self.hub.to_display({"type": "sla", "case_id": case["id"],
+                                       "marker": marker, "text": said})
+            # The checklist goes back up with the warning. Being told the clock
+            # is running is only half of it; what is still unticked is the
+            # other half, and it is the half you can act on.
+            await self.hub.to_display({"type": "show_case"})
+            if self.chime:
+                await self.hub.to_audio({"type": "chime", "kind": "alert"})
+            await self.hub.to_audio({"type": "speak", "text": said})
+            await self.hub.to_audio({"type": "speak_done"})
+
+    async def _reminder_tick(self) -> None:
         now = time.time()
         for row in self.store.due_reminders(now):
             # Mark fired BEFORE announcing. If announcing throws, or the

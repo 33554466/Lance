@@ -50,82 +50,6 @@ tools:
     # blocked_domains: ["pinterest.com"]
     # allowed_domains: []
 
-reminders:
-  # Timers and reminders — the only thing here that speaks without being
-  # spoken to first. Stored in SQLite with absolute timestamps, so a restart,
-  # an update, or a crash costs you nothing: pending items reload and fire.
-  #
-  # The MODEL does the date arithmetic. It is told the current time in every
-  # request, so "in twenty minutes" and "tomorrow at seven" resolve upstream.
-  # That keeps daylight-saving bugs out of the appliance entirely.
-  #
-  #   curl -s localhost:8760/reminders | jq
-  enabled: true
-  max_pending: 50
-
-desktop:
-  # Window management, as a fixed vocabulary of verbs — never a shell.
-  #
-  # Every input here arrives through a wake word that occasionally misfires
-  # and a transcriber that occasionally mishears. `xdotool type` can drive
-  # any application including a terminal, so there is deliberately no tool
-  # for typing, clicking, closing windows, or running commands. What is here
-  # is what can be undone by saying the opposite.
-  #
-  # X11 only. Wayland stops one application moving another's windows on
-  # purpose; the tools say so rather than failing obscurely.
-  #   sudo apt install -y wmctrl xdotool
-  enabled: true
-  # Windows the assistant will refuse to minimise — its own display, so that
-  # "minimise everything" cannot blank the screen you watch it on.
-  protect: ["assistant", "lance"]
-  # ALSA card for volume. The assistant plays through the array, so the
-  # system default sink is the wrong device.
-  volume_card: "Array"
-  display: ":0"
-
-lists:
-  # Named lists. Add, remove, read, clear, and ask what is on all of them.
-  #   curl -s localhost:8760/lists | jq
-  #   curl -s localhost:8760/lists/work | jq
-  enabled: true
-  # Used when no list is named. "Add milk" should not need qualifying.
-  default: "shopping"
-  # Add a new list by adding it here. `say` is how the assistant refers to it
-  # out loud; `aliases` are the other things a person might actually SAY for
-  # it. Speech does not arrive with a dropdown attached — "put it on the
-  # honey-do list" and "add it to the house list" have to reach the same
-  # place, and the only way that happens is if you write both down.
-  #
-  # Getting this wrong fails SILENTLY: the item lands on a list nobody reads,
-  # which is the same as losing it. So be generous with aliases.
-  known:
-    shopping:
-      say: "shopping list"
-      aliases: ["groceries", "grocery", "store", "supermarket", "food"]
-    work:
-      say: "work board"
-      aliases: ["office", "job", "work todo", "work to do", "day job"]
-    projects:
-      say: "projects board"
-      aliases: ["project", "builds", "build", "workshop", "garage"]
-    personal:
-      say: "personal board"
-      aliases: ["health", "money", "my own", "own list", "admin"]
-    army:
-      say: "army board"
-      aliases: ["military", "guard", "unit", "drill", "training", "readiness"]
-    house:
-      say: "house board"
-      aliases: ["home", "honey do", "honey-do", "chores", "around the house",
-                "household", "yard", "garden"]
-    kids:
-      say: "kids board"
-      aliases: ["children", "kid", "school", "family"]
-  # Allow creating a list that is not named above, when one is clearly asked
-  # for — "start a packing list". Set false to restrict to the list above.
-  allow_new: true
-
 memory:
   # Durable facts, remembered across restarts and across months.
   #
@@ -183,66 +107,6 @@ documents:
   format: "txt"
   # Refuse anything longer. A runaway generation should not fill the disk.
   max_chars: 20000
-
-casework:
-  # Investigations with a clock on them. Say "I'm starting a phishing email
-  # investigation" and Lance opens a case: the SLA starts, the checklist goes
-  # on the monitor, and he tracks both columns until you close it.
-  enabled: true
-
-  # One YAML file per kind of case. Re-read every time a case opens, so you
-  # can fix a step in a text editor and the next case has it — no restart.
-  playbook_dir: "~/assistant/playbooks"
-
-  sla:
-    # Minutes from the moment you say you are starting.
-    #
-    # THESE NUMBERS ARE PLACEHOLDERS. They are what a mid-sized shop tends to
-    # run, not what YOUR shop runs. Put your real ones here — this is the one
-    # setting in this block that is wrong until you change it.
-    default: 240
-    tiers:
-      critical: 60
-      high: 120
-      standard: 240
-      low: 480
-
-    # Speak up at these fractions of the window...
-    warn_at: [0.5, 0.75]
-    # ...and always this many minutes out, whatever the tier. Fractions alone
-    # are wrong for a short SLA: 90% of an hour is six minutes of notice.
-    warn_final_minutes: 15
-
-printer:
-  # MUNBYN ITPP047. It reports itself as a Seiko Epson TM-m30-II, which is
-  # whose ESC/POS dialect it speaks.
-  enabled: true
-
-  # Measured on the device by printer_probe, not guessed. The IN endpoint is
-  # 0x81 here; the usual guess is 0x82 and it would have failed as a silent
-  # thirty-second timeout.
-  vendor_id: "0x04b8"
-  product_id: "0x0e20"
-  out_ep: "0x01"
-  in_ep: "0x81"
-
-  # Characters per line at the default font. 42 is right for 80 mm paper.
-  # If lists wrap in odd places, this is the number to change — set it to
-  # whatever the printer's own self-test page reports.
-  width: 42
-
-  cut: true
-  feed_lines: 3
-
-  # Printed above the title, the way a shop name sits on a till receipt.
-  # Set to "" for no masthead.
-  header: "LANCE"
-
-  # Give up rather than hang. A printer that is off, jammed, or out of paper
-  # must not hold a worker thread while someone is waiting to be answered.
-  timeout_ms: 5000
-
-
 
 location:
   # Passed to the search tool so "near me", "tonight" and local business
@@ -346,42 +210,6 @@ context:
     figure or the fact, and say how fresh it is only when that matters — "as
     of this morning" for a price, nothing at all for a forecast.
 
-    You can set timers and reminders. Work out the absolute time yourself
-    from the timestamp in the message — "in twenty minutes", "at six", "next
-    Tuesday morning" — and pass it as ISO 8601 local time. Use kind 'timer'
-    for short countdowns and 'reminder' for anything tied to a clock time.
-    Confirm briefly: "Set, in twenty minutes." Never read the timestamp back.
-
-    You keep a shopping list and five task boards for {user}: house,
-    projects, kids, work, personal, and army. Add items as they are
-    mentioned, several at once when several are named.
-
-    Choose from what was said. "We need milk" is shopping; "email the
-    contractor" is work; "the gutters need clearing" is house; "finish the
-    garage shelf" is projects; "book my physical" is personal; "drill
-    weekend paperwork" is army. If it is genuinely ambiguous, ask which one —
-    one short question — rather than guessing. An item filed on the wrong
-    board is not wrong, it is lost, because nobody will ever look there.
-
-    When {user} says they have done, finished, or handled something, tick it
-    off with list_complete rather than removing it. Completed items stay
-    visible on the board, which is how they can see what they got through.
-
-    There are no due dates or priorities. If timing matters {user} puts it in
-    the wording of the item itself, so keep their phrasing intact.
-
-    When reading a list back, say it as a person would — "milk, eggs, bread
-    and coffee" — never as a numbered list, and never read the list name back
-    to them when they just told you what it was.
-
-    You can arrange windows on the screen: list them, focus one, maximise,
-    restore, fullscreen, minimise, snap to the left or right half, centre, and
-    switch workspace. If it is unclear which window is meant, list them and
-    ask rather than guessing.
-
-    You cannot close windows, type, click, or run commands, and you should
-    say so plainly if asked — those are not missing by accident.
-
     You can save notes and documents to {user}'s notes folder, and read them
     back. Use save_note whenever they ask you to write something down, take
     a note, draft something, or make a list — do it without asking permission
@@ -413,44 +241,6 @@ context:
 
     Use recall to search past conversations when they refer to something from
     before that is not in what you already know.
-
-    {user} runs investigations at work. When he says he is starting one —
-    "I am starting a phishing email investigation" — call start_case
-    immediately. Do not ask which playbook, how urgent it is, or for a ticket
-    number first. The clock started when he said it started, and every
-    question you ask before opening the case is time off it. If he gave a
-    reference or a severity, pass them; if not, leave them out.
-
-    While a case is open, keep replies to one sentence. He is reading a
-    screen and working, not having a conversation.
-
-    When he says he did something, tick it off with check_step using his own
-    words — matching handles the wording, so do not translate it. If he also
-    said what he FOUND, pass it as the finding: "the domain was registered
-    four days ago" belongs on that step, and it is what turns the write-up at
-    the end into transcription instead of recall.
-
-    Never tick off a step he did not say he did. An unticked step costs him
-    ten seconds. A wrongly ticked one reads afterwards as work that was done,
-    and that is how a thing gets missed.
-
-    If it is unclear which step he means, ask one short question naming the
-    two candidates rather than guessing.
-
-    You can print on paper. Use print_list when {user} wants a list to take
-    with him, and print_case for the investigation.
-
-    Printing IS the reply. Confirm in one short sentence and do not read the
-    items back — the paper is the point, and reciting it defeats the point.
-
-    For the case, pick `only` from what was asked. "What have I still got to
-    do" is open. "Print my findings", or anything about writing the report, is
-    findings. A handover or a full write-up is all. The full record runs to
-    about a foot of paper, so do not print it when the short one was wanted.
-
-    If a print fails you will get a plain sentence back — no printer, no
-    access, no response. Say that sentence and stop. Do not retry, and do not
-    offer to read the list out instead unless he asks.
 
     If you do not know something and cannot look it up, say so in one short
     sentence rather than guessing. If a request is ambiguous, ask one
@@ -513,16 +303,6 @@ audio:
   # the XMOS to fully discharge; three is cheap insurance.
   usb_power_off_seconds: 3
 
-  # If no audio frames arrive for this long, the microphone is gone —
-  # unplugged, switched off, or wedged — and the service exits so systemd can
-  # restart it into the device recovery loop. That makes an unplug, a power
-  # switch and a warm-reboot wedge all self-healing.
-  #
-  # Note this does NOT fire when you press the array's mute button: a muted
-  # array still streams silence, which is exactly the distinction we want.
-  # Set to 0 to disable.
-  stall_timeout_seconds: 15
-
   sample_rate: 16000
   frame_ms: 80             # 1280 samples at 16 kHz
 
@@ -578,7 +358,7 @@ stt:
 tts:
   engine: "piper"
   # Path is resolved by scripts/fetch_models.sh
-  voice: "models/piper/en_GB-semaine-medium.onnx"
+  voice: "models/piper/en_US-lessac-medium.onnx"
   # Speaking rate. 1.0 is the model default; lower is slower.
   length_scale: 1.0
 
@@ -642,45 +422,6 @@ behaviour:
     - "no thanks"
     - "thank you thats all"
     - "thank you that's all"
-  # Play a rising three-tone when a timer or reminder fires. Longer and more
-  # insistent than the wake chime, because it has to cut through a running
-  # tap and a conversation — but deliberately not an alarm clock.
-  reminder_chime: true
-
-  # Saying any of these switches to patient endpointing for exactly ONE
-  # utterance, then reverts. Composing a sentence out loud involves much
-  # longer pauses than asking a question, and one global setting cannot
-  # serve both without making the other feel broken.
-  dictation_phrases:
-    - "take this down"
-    - "take a letter"
-    - "take dictation"
-    - "write this down"
-    - "let me dictate"
-    - "dictation"
-  # Trailing silence allowed while dictating, and the hard cap.
-  dictation_silence_ms: 1800
-  dictation_max_seconds: 120
-
-  # Repeat the last reply. Answered entirely in the audio process — no API
-  # call, no latency, no cost, and it still works with the network down.
-  repeat_phrases:
-    - "say that again"
-    - "repeat that"
-    - "repeat"
-    - "what did you say"
-    - "come again"
-    - "one more time"
-  # Same, but slower — for phone numbers, addresses, and anything you are
-  # writing down while it talks.
-  repeat_slow_phrases:
-    - "say that again slowly"
-    - "repeat that slowly"
-    - "slower"
-    - "say it slower"
-    - "more slowly"
-  slow_length_scale: 1.4
-
   # Play a short falling two-tone when dismissed. Rising means awake, falling
   # means asleep — the direction carries the meaning without explanation.
   stop_chime: true

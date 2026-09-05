@@ -55,3 +55,18 @@ faster-whisper>=1.0.3
 
 # --- speech synthesis ---
 piper-tts>=1.2.0
+
+# --- receipt printer (MUNBYN ITPP047, Epson TM-m30-II ESC/POS) ---
+# python-escpos talks libusb directly rather than through CUPS: no print
+# queue, no spooler, no job that silently sits in a "processing" state for
+# an hour. pyusb is its transport and is listed explicitly so a rebuild
+# cannot resolve without it.
+pyusb>=1.2.1
+python-escpos>=3.0
+
+# --- semantic recall ---
+# ONNX sentence embeddings. Chosen over sentence-transformers specifically
+# because that pulls PyTorch, which was removed from this project on purpose
+# (see the VAD note above). fastembed rides on onnxruntime, which is already
+# here for the wake word, and adds four small pure-Python/Rust packages.
+fastembed>=0.4

@@ -144,32 +144,6 @@ memory:
   # retrieval, not injection.
   max_facts: 200
 
-  # Semantic recall. The keyword search is kept — this runs alongside it.
-  #
-  # Keyword finds "INC-4412" and surnames. Meaning finds "the roof" in a
-  # sentence about shingles. Neither replaces the other, so both vote and the
-  # rankings are merged.
-  semantic:
-    enabled: true
-
-    # 69 MB, 384 dimensions, runs on ONNX Runtime — already a dependency here
-    # for the wake word. Changing this model invalidates every stored vector
-    # and triggers an automatic re-index; that is handled, but it costs an
-    # hour of background work, so do not change it casually.
-    model: "BAAI/bge-small-en-v1.5"
-    cache_dir: "~/assistant/models/embed"
-
-    # Capped so embedding never competes with transcription. Whisper wants the
-    # cores while someone is mid-sentence; an embedding that takes 40 ms
-    # instead of 25 ms is invisible, a stuttering transcription is not.
-    threads: 2
-
-    # Background indexing. Small batches with a gap, then a long sleep once
-    # there is nothing left to do.
-    backfill_batch: 32
-    backfill_gap_seconds: 2.0
-    backfill_idle_seconds: 300.0
-
 documents:
   # Plain text notes, written by the assistant on request. The Linux
   # equivalent of "save this in Notepad".

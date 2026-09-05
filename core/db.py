@@ -83,10 +83,93 @@ CREATE TABLE IF NOT EXISTS list_items (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     list     TEXT NOT NULL DEFAULT 'shopping',
     text     TEXT NOT NULL,
-    added    REAL NOT NULL
+    added    REAL NOT NULL,
+    -- Checking a thing off is what separates a task board from a list. The
+    -- item stays: "done" is a state, not a deletion, so the board can show
+    -- what you got through today rather than only what is left.
+    done     INTEGER NOT NULL DEFAULT 0,
+    done_at  REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_list_items ON list_items(list, id);
+
+-- Casework: an investigation with a clock on it.
+--
+-- This is deliberately NOT another named list. A list is a bag of strings you
+-- add to and tick off in any order. A case is a template instantiated at a
+-- moment in time, with an SLA deadline, an ordered checklist that came from a
+-- playbook, and findings attached to individual steps. Those differences all
+-- point the same way: a separate table.
+--
+-- The steps are COPIED from the playbook at open time rather than referenced.
+-- That costs a few rows and buys the thing that actually matters: editing the
+-- playbook tomorrow does not silently rewrite what you did today. A closed
+-- case is a record, and a record that changes underneath you is not one.
+CREATE TABLE IF NOT EXISTS cases (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind      TEXT    NOT NULL DEFAULT 'phishing',
+    title     TEXT    NOT NULL,
+    ref       TEXT,                        -- ticket number, if there is one
+    severity  TEXT    NOT NULL DEFAULT 'standard',
+    opened    REAL    NOT NULL,
+    sla_due   REAL,                        -- absolute deadline, or NULL
+    closed    REAL,
+    outcome   TEXT,
+    notes     TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_cases_open
+    ON cases(opened) WHERE closed IS NULL;
+
+CREATE TABLE IF NOT EXISTS case_steps (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id  INTEGER NOT NULL,
+    side     TEXT    NOT NULL DEFAULT 'investigation',  -- investigation | admin
+    phase    TEXT,                          -- grouping header on screen
+    seq      INTEGER NOT NULL,
+    key      TEXT    NOT NULL,
+    text     TEXT    NOT NULL,
+    aliases  TEXT    NOT NULL DEFAULT '',   -- newline-joined spoken variants
+    done     INTEGER NOT NULL DEFAULT 0,
+    done_at  REAL,
+    -- What he actually found. "sender domain registered four days ago" hangs
+    -- off the step it belongs to, which is what makes the write-up at the end
+    -- a transcription job rather than a memory test.
+    finding  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_steps
+    ON case_steps(case_id, side, seq);
+
+-- One row per SLA warning already spoken. Without this the scheduler
+-- re-announces "halfway through your SLA" every single second, which is a
+-- uniquely bad way to spend an afternoon.
+CREATE TABLE IF NOT EXISTS case_alerts (
+    case_id INTEGER NOT NULL,
+    marker  TEXT    NOT NULL,
+    fired   REAL    NOT NULL,
+    PRIMARY KEY (case_id, marker)
+);
+
+-- Vectors for semantic recall. Same file as everything else, deliberately:
+-- one thing to back up, one thing to corrupt, and no second server to be
+-- running or not running.
+--
+-- `model` is part of the row, not a global setting, because vectors from two
+-- different models are not comparable and mixing them produces confident
+-- nonsense. Changing the configured model orphans the old rows rather than
+-- silently ranking against them.
+CREATE TABLE IF NOT EXISTS embeddings (
+    kind    TEXT    NOT NULL,          -- message | memory
+    ref_id  INTEGER NOT NULL,
+    model   TEXT    NOT NULL,
+    vec     BLOB    NOT NULL,
+    made    REAL    NOT NULL,
+    PRIMARY KEY (kind, ref_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
+    ON embeddings(kind, model);
 
 CREATE TABLE IF NOT EXISTS usage (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +206,26 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns to tables that already exist.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing when the table is
+        already there, so a new column in SCHEMA never reaches a live
+        database. Checked and added explicitly — this runs against a file
+        holding real household data and must never drop anything.
+        """
+        cols = {r["name"] for r in
+                self.conn.execute("PRAGMA table_info(list_items)").fetchall()}
+        for name, ddl in (("done", "INTEGER NOT NULL DEFAULT 0"),
+                          ("done_at", "REAL")):
+            if name not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE list_items ADD COLUMN {name} {ddl}")
+                log_msg = f"migrated: list_items.{name} added"
+                print(log_msg)
 
     # -- messages ---------------------------------------------------
 
@@ -263,6 +365,8 @@ class Store:
     def list_add(self, items: list[str], list_name: str = "shopping") -> list[str]:
         added = []
         existing = {r["text"].lower() for r in self.list_read(list_name)}
+        # Only OPEN items count as duplicates — re-adding something
+        # you finished last month is a new task, not a mistake.
         for raw in items:
             text = " ".join(raw.split()).strip()
             if not text or text.lower() in existing:
@@ -276,11 +380,48 @@ class Store:
         self.conn.commit()
         return added
 
-    def list_read(self, list_name: str = "shopping") -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT id, text FROM list_items WHERE list = ? ORDER BY id",
-            (list_name,),
-        ).fetchall()
+    def list_read(self, list_name: str = "shopping",
+                  include_done: bool = False) -> list[sqlite3.Row]:
+        """Open items by default. Done ones are still there — ask for them."""
+        sql = ("SELECT id, text, done, done_at FROM list_items WHERE list = ?"
+               + ("" if include_done else " AND done = 0")
+               + " ORDER BY done, id")
+        return self.conn.execute(sql, (list_name,)).fetchall()
+
+    def list_complete(self, items: list[str], list_name: str,
+                      done: bool = True) -> list[str]:
+        """Tick items off, or put them back. Matches loosely, like removal."""
+        changed = []
+        now = time.time()
+        for raw in items:
+            needle = " ".join(str(raw).split()).strip().lower()
+            if not needle:
+                continue
+            for row in self.list_read(list_name, include_done=True):
+                if needle in row["text"].lower() and bool(row["done"]) != done:
+                    self.conn.execute(
+                        "UPDATE list_items SET done = ?, done_at = ? "
+                        "WHERE id = ?",
+                        (1 if done else 0, now if done else None, row["id"]))
+                    changed.append(row["text"])
+        self.conn.commit()
+        return changed
+
+    def list_clear_done(self, list_name: str | None = None) -> int:
+        if list_name:
+            cur = self.conn.execute(
+                "DELETE FROM list_items WHERE done = 1 AND list = ?",
+                (list_name,))
+        else:
+            cur = self.conn.execute("DELETE FROM list_items WHERE done = 1")
+        self.conn.commit()
+        return cur.rowcount
+
+    def done_since(self, since_ts: float) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM list_items WHERE done = 1 "
+            "AND done_at >= ?", (since_ts,)).fetchone()
+        return int(row["n"])
 
     def list_remove(self, items: list[str],
                     list_name: str = "shopping") -> list[str]:
@@ -300,7 +441,7 @@ class Store:
     def list_counts(self) -> list[tuple[str, int]]:
         """Every list that has anything on it, with its size."""
         rows = self.conn.execute(
-            "SELECT list, COUNT(*) AS n FROM list_items "
+            "SELECT list, COUNT(*) AS n FROM list_items WHERE done = 0 "
             "GROUP BY list ORDER BY list"
         ).fetchall()
         return [(r["list"], int(r["n"])) for r in rows]
@@ -310,6 +451,184 @@ class Store:
                                 (list_name,))
         self.conn.commit()
         return cur.rowcount
+
+    # -- casework ---------------------------------------------------
+
+    def case_open(self, kind: str, title: str, severity: str,
+                  sla_due: float | None, ref: str | None,
+                  steps: list[dict]) -> int:
+        """Create a case and stamp the playbook's steps onto it."""
+        cur = self.conn.execute(
+            "INSERT INTO cases (kind, title, ref, severity, opened, sla_due) "
+            "VALUES (?,?,?,?,?,?)",
+            (kind, title.strip(), (ref or "").strip() or None,
+             severity, time.time(), sla_due),
+        )
+        case_id = int(cur.lastrowid)
+        for i, s in enumerate(steps):
+            self.conn.execute(
+                "INSERT INTO case_steps "
+                "(case_id, side, phase, seq, key, text, aliases) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (case_id, s.get("side", "investigation"), s.get("phase"),
+                 i, s["key"], s["text"], "\n".join(s.get("aliases") or [])),
+            )
+        self.conn.commit()
+        return case_id
+
+    def case_active(self) -> sqlite3.Row | None:
+        """The case in front of you: most recently opened and still open."""
+        return self.conn.execute(
+            "SELECT * FROM cases WHERE closed IS NULL "
+            "ORDER BY opened DESC LIMIT 1"
+        ).fetchone()
+
+    def case_get(self, case_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+
+    def cases_open(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM cases WHERE closed IS NULL ORDER BY opened"
+        ).fetchall()
+
+    def case_steps(self, case_id: int,
+                   side: str | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM case_steps WHERE case_id = ?"
+        args: list[Any] = [case_id]
+        if side:
+            sql += " AND side = ?"
+            args.append(side)
+        return self.conn.execute(sql + " ORDER BY seq", args).fetchall()
+
+    def case_step_set(self, step_id: int, done: bool,
+                      finding: str | None = None) -> None:
+        if finding is not None:
+            self.conn.execute(
+                "UPDATE case_steps SET done=?, done_at=?, finding=? WHERE id=?",
+                (1 if done else 0, time.time() if done else None,
+                 finding.strip() or None, step_id))
+        else:
+            self.conn.execute(
+                "UPDATE case_steps SET done=?, done_at=? WHERE id=?",
+                (1 if done else 0, time.time() if done else None, step_id))
+        self.conn.commit()
+
+    def case_progress(self, case_id: int) -> dict[str, tuple[int, int]]:
+        """{side: (done, total)} — what the status read-back is built from."""
+        rows = self.conn.execute(
+            "SELECT side, COUNT(*) AS n, SUM(done) AS d FROM case_steps "
+            "WHERE case_id = ? GROUP BY side", (case_id,)).fetchall()
+        return {r["side"]: (int(r["d"] or 0), int(r["n"])) for r in rows}
+
+    def case_note(self, case_id: int, text: str) -> None:
+        row = self.case_get(case_id)
+        prior = (row["notes"] if row else "") or ""
+        stamp = time.strftime("%H:%M", time.localtime())
+        self.conn.execute("UPDATE cases SET notes = ? WHERE id = ?",
+                          (f"{prior}{stamp}  {text.strip()}\n", case_id))
+        self.conn.commit()
+
+    def case_close(self, case_id: int, outcome: str | None) -> None:
+        self.conn.execute(
+            "UPDATE cases SET closed = ?, outcome = ? WHERE id = ?",
+            (time.time(), (outcome or "").strip() or None, case_id))
+        self.conn.commit()
+
+    def case_set_sla(self, case_id: int, sla_due: float | None) -> None:
+        self.conn.execute("UPDATE cases SET sla_due = ? WHERE id = ?",
+                          (sla_due, case_id))
+        self.conn.commit()
+
+    def case_alert_once(self, case_id: int, marker: str) -> bool:
+        """True the first time this marker is claimed, False ever after.
+
+        The INSERT is the lock. Checking-then-inserting would let two
+        scheduler ticks both decide they were first.
+        """
+        try:
+            self.conn.execute(
+                "INSERT INTO case_alerts (case_id, marker, fired) "
+                "VALUES (?,?,?)", (case_id, marker, time.time()))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    # -- embeddings -------------------------------------------------
+
+    def embeddings_put(self, kind: str, model: str,
+                       rows: list[tuple[int, bytes]]) -> None:
+        self.conn.executemany(
+            "INSERT INTO embeddings (kind, ref_id, model, vec, made) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(kind, ref_id, model) "
+            "DO UPDATE SET vec=excluded.vec, made=excluded.made",
+            [(kind, rid, model, vec, time.time()) for rid, vec in rows],
+        )
+        self.conn.commit()
+
+    def embeddings_all(self, kind: str, model: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT ref_id, vec FROM embeddings WHERE kind = ? AND model = ? "
+            "ORDER BY ref_id", (kind, model),
+        ).fetchall()
+
+    def embeddings_missing(self, kind: str, model: str,
+                           limit: int) -> list[sqlite3.Row]:
+        """Rows of `kind` with no vector for this model yet.
+
+        Newest first. If the backfill never finishes — a big history, a box
+        that gets rebooted — the half that IS indexed should be the half you
+        are most likely to ask about.
+        """
+        if kind == "memory":
+            sql = ("SELECT m.id, m.text FROM memories m "
+                   "LEFT JOIN embeddings e ON e.ref_id = m.id "
+                   "  AND e.kind = 'memory' AND e.model = ? "
+                   "WHERE e.ref_id IS NULL ORDER BY m.id DESC LIMIT ?")
+        else:
+            sql = ("SELECT m.id, m.content AS text FROM messages m "
+                   "LEFT JOIN embeddings e ON e.ref_id = m.id "
+                   "  AND e.kind = 'message' AND e.model = ? "
+                   "WHERE e.ref_id IS NULL AND LENGTH(m.content) >= 12 "
+                   "ORDER BY m.id DESC LIMIT ?")
+        return self.conn.execute(sql, (model, limit)).fetchall()
+
+    def embeddings_counts(self, model: str) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM embeddings WHERE model = ? "
+            "GROUP BY kind", (model,)).fetchall()
+        return {r["kind"]: int(r["n"]) for r in rows}
+
+    def embeddings_drop_other_models(self, keep: str) -> int:
+        """Delete vectors from any other model.
+
+        Called when the configured model changes. Keeping them wastes space
+        and risks a future bug ranking across incompatible spaces; the cost of
+        being wrong is a re-index, which is cheap and automatic.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM embeddings WHERE model != ?", (keep,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def messages_by_ids(self, ids: list[int]) -> list[sqlite3.Row]:
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT id, ts, role, content FROM messages WHERE id IN ({marks})",
+            ids).fetchall()
+        order = {rid: i for i, rid in enumerate(ids)}
+        return sorted(rows, key=lambda r: order.get(r["id"], 1 << 30))
+
+    def search_ids(self, query: str, limit: int = 20) -> list[int]:
+        """Keyword hit IDs in relevance order, for the hybrid merge."""
+        rows = self.conn.execute(
+            "SELECT f.rowid AS id FROM messages_fts f "
+            "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
+            (query, limit)).fetchall()
+        return [int(r["id"]) for r in rows]
 
     # -- usage ------------------------------------------------------
 

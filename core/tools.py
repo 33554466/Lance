@@ -281,7 +281,12 @@ class MemoryTools:
     and the model still cannot find anything.
     """
 
-    def __init__(self, cfg: dict, store):
+    def __init__(self, cfg: dict, store, index=None):
+        # Semantic index, when one is available. Optional on purpose:
+        # every path below has to keep working when the embedding
+        # model is missing, because it is a 69 MB download that can
+        # simply not be there yet.
+        self.index = index
         m = cfg.get("memory", {}) or {}
         self.enabled = bool(m.get("enabled", False))
         self.max_facts = int(m.get("max_facts", 200))
@@ -397,9 +402,30 @@ class MemoryTools:
             if n >= self.max_facts:
                 return (f"Memory is full at {n} facts. Ask the user what to "
                         f"forget before storing more.")
+            # A restatement is not a new fact. UNIQUE on the text column only
+            # catches character-identical entries, so "his daughter plays
+            # soccer" and "Brendan's daughter is on a soccer team" both land,
+            # and both then ride along in every future prompt forever.
+            if self.index is not None:
+                dup = self.index.duplicate_of(fact)
+                if dup is not None:
+                    rows = [r for r in self.store.list_memories()
+                            if r["id"] == dup]
+                    if rows:
+                        log.info("memory duplicate of #%d: %s", dup, fact)
+                        return ("Already known, near enough: "
+                                f"{rows[0]['text']}")
             what = self.store.add_memory(
                 fact, (args.get("category") or "general").strip().lower())
             log.info("memory %s: %s", what, fact)
+            if self.index is not None:
+                row = next((r for r in self.store.list_memories()
+                            if r["text"] == fact), None)
+                if row is not None:
+                    # Indexed immediately rather than by the backfill loop.
+                    # Memories are few and the very next thing said is often
+                    # a correction of this one.
+                    self.index.index("memory", [(row["id"], fact)])
             return f"{what.capitalize()}. You will know this next time."
 
         if name == "forget":
@@ -419,10 +445,23 @@ class MemoryTools:
             query = (args.get("query") or "").strip()
             if not query:
                 return "No search terms given."
+            # Keyword first. FTS5 is the only one of the two that reliably
+            # finds "INC-4412", a surname, or a part number — every ticket
+            # number embeds to roughly the same place.
             try:
-                rows = self.store.search(query, limit=8)
-            except Exception as exc:  # noqa: BLE001 — FTS syntax errors
-                return f"Could not search for that: {exc}"
+                kw_ids = self.store.search_ids(query, limit=20)
+            except Exception:  # noqa: BLE001 — FTS syntax, e.g. a bare quote
+                kw_ids = []
+            rows = []
+            if self.index is not None and self.index.embedder.available:
+                ids = self.index.hybrid(query, kw_ids, limit=8)
+                rows = self.store.messages_by_ids(ids)
+            if not rows:
+                # No index, or it returned nothing: the old path, unchanged.
+                try:
+                    rows = self.store.search(query, limit=8)
+                except Exception as exc:  # noqa: BLE001
+                    return f"Could not search for that: {exc}"
             if not rows:
                 return f"Nothing found in past conversations about {query!r}."
             out = []
@@ -645,6 +684,53 @@ class TimerTools:
                     "input_schema": {"type": "object", "properties": {}},
                 },
                 {
+                    "name": "list_complete",
+                    "description": (
+                        "Tick items off as done. Use whenever the user says "
+                        "they finished, did, completed, or handled something. "
+                        "Items are kept, not deleted — they show as done on "
+                        "the board and can be reopened."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "items": {"type": "array",
+                                      "items": {"type": "string"}},
+                            "list": {"type": "string"},
+                        },
+                        "required": ["items"],
+                    },
+                },
+                {
+                    "name": "list_reopen",
+                    "description": (
+                        "Put a completed item back to open — for when "
+                        "something was ticked off by mistake or needs doing "
+                        "again."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "items": {"type": "array",
+                                      "items": {"type": "string"}},
+                            "list": {"type": "string"},
+                        },
+                        "required": ["items"],
+                    },
+                },
+                {
+                    "name": "list_clear_done",
+                    "description": (
+                        "Permanently remove completed items. Omit `list` to "
+                        "clear finished items everywhere. This one cannot be "
+                        "undone, so confirm first."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"list": {"type": "string"}},
+                    },
+                },
+                {
                     "name": "list_read",
                     "description": (
                         "Read a list back. Returns the items; say them "
@@ -675,7 +761,8 @@ class TimerTools:
                 return "Reminders are turned off in the configuration."
             return self._reminders(name, args)
         if name in ("list_add", "list_remove", "list_read", "list_clear",
-                    "list_all", "show_board"):
+                    "list_all", "show_board", "list_complete", "list_reopen",
+                    "list_clear_done"):
             if not self.lists_enabled:
                 return "Lists are turned off in the configuration."
             return self._lists(name, args)
@@ -773,6 +860,31 @@ class TimerTools:
                     f"{self.spoken_name(which)}. {total} "
                     f"item{'s' if total != 1 else ''} now.")
 
+        if name == "list_complete":
+            done = self.store.list_complete([str(i) for i in items], which, True)
+            if not done:
+                return (f"Could not find that open on the "
+                        f"{self.spoken_name(which)}.")
+            left = len(self.store.list_read(which))
+            return (f"Ticked off {', '.join(done)}. "
+                    f"{left} left on the {self.spoken_name(which)}."
+                    if left else
+                    f"Ticked off {', '.join(done)}. That clears the "
+                    f"{self.spoken_name(which)}.")
+
+        if name == "list_reopen":
+            back = self.store.list_complete([str(i) for i in items], which, False)
+            if not back:
+                return f"Nothing completed matching that."
+            return f"Put {', '.join(back)} back."
+
+        if name == "list_clear_done":
+            target = self.resolve_list(args.get("list")) if args.get("list") else None
+            n = self.store.list_clear_done(target)
+            where = f"the {self.spoken_name(target)}" if target else "all lists"
+            return (f"Removed {n} completed item{'s' if n != 1 else ''} from "
+                    f"{where}.") if n else f"Nothing completed to clear from {where}."
+
         if name == "list_remove":
             gone = self.store.list_remove([str(i) for i in items], which)
             if not gone:
@@ -781,10 +893,14 @@ class TimerTools:
 
         if name == "list_read":
             rows = self.store.list_read(which)
+            all_rows = self.store.list_read(which, include_done=True)
+            done_n = len(all_rows) - len(rows)
             if not rows:
-                return f"The {self.spoken_name(which)} is empty."
+                return (f"Nothing open on the {self.spoken_name(which)}"
+                        + (f", though {done_n} done." if done_n else "."))
+            tail = f" And {done_n} done." if done_n else ""
             return (f"{len(rows)} on the {self.spoken_name(which)}: "
-                    + ", ".join(r["text"] for r in rows))
+                    + ", ".join(r["text"] for r in rows) + "." + tail)
 
         if name == "list_clear":
             n = self.store.list_clear(which)
@@ -796,6 +912,9 @@ class TimerTools:
 
 
 from .desktop import DesktopTools
+from .casework import CaseTools
+from .printer import PrinterTools
+from .embed import Embedder, SemanticIndex
 
 
 class Toolbox:
@@ -803,13 +922,24 @@ class Toolbox:
 
     def __init__(self, cfg: dict, store):
         self.docs = DocumentTools(cfg)
-        self.mem = MemoryTools(cfg, store)
+        self.embedder = Embedder(cfg)
+        self.index = SemanticIndex(store, self.embedder)
+        self.mem = MemoryTools(cfg, store, index=self.index)
         self.timers = TimerTools(cfg, store)
         self.desktop = DesktopTools(cfg)
+        self.cases = CaseTools(cfg, store)
+        # The printer borrows the list-name resolver and the notes directory
+        # rather than owning its own. "Print the honey-do list" has to land on
+        # the same board "add milk to the honey-do list" does — two resolvers
+        # would drift, and the failure mode is a printed list that is real but
+        # not the one that was asked for.
+        self.printer = PrinterTools(cfg, store, timers=self.timers,
+                                    doctools=self.docs)
 
     def schemas(self) -> list[dict]:
         return (self.docs.schemas() + self.mem.schemas()
-                + self.timers.schemas() + self.desktop.schemas())
+                + self.timers.schemas() + self.desktop.schemas()
+                + self.cases.schemas() + self.printer.schemas())
 
     def memory_block(self) -> str:
         return self.mem.block()
@@ -823,7 +953,8 @@ class Toolbox:
             return f"That failed: {type(exc).__name__}: {exc}"
 
     def _run_sync(self, name: str, args: dict) -> str:
-        for handler in (self.desktop.run_sync, self.timers.run_sync,
+        for handler in (self.printer.run_sync, self.cases.run_sync,
+                        self.desktop.run_sync, self.timers.run_sync,
                         self.mem.run_sync):
             out = handler(name, args)
             if out is not None:

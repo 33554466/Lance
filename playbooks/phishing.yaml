@@ -1,0 +1,197 @@
+# Phishing email investigation
+# ----------------------------------------------------------------------
+# Say "I'm starting a phishing email investigation" and this becomes a live
+# case: SLA clock running, checklist on the monitor, two columns.
+#
+#   investigation:  what you look at to answer "is this malicious"
+#   admin:          what your employer needs from you afterwards
+#
+# The admin column below is a PLACEHOLDER. Replace those steps with your real
+# ones — reports, forms, notification emails, ticket transitions. Nothing else
+# needs to change; the file is read fresh every time a case opens.
+#
+# Editing this file does not alter cases that are already open. Steps are
+# copied onto a case when it starts, so a closed case stays an accurate record
+# of what you actually did, not what the playbook says today.
+#
+# Each step:
+#   key      stable identifier, never spoken
+#   text     what appears on screen
+#   aliases  things you might actually SAY to tick it off. Be generous here —
+#            this is how "check off the hashes" finds the right line. Matching
+#            is whole-word, longest-alias-wins, so short aliases are safe.
+
+kind: phishing
+title: Phishing email
+say: phishing investigation
+aliases:
+  - phish
+  - phishing
+  - phishing email
+  - suspicious email
+  - reported email
+  - email investigation
+  - user reported email
+
+# Which SLA tier this opens at unless you say otherwise.
+severity_default: standard
+
+investigation:
+
+  - phase: Intake
+    steps:
+      - key: original
+        text: Get the original message as .eml/.msg, not a forward
+        aliases: [original, original message, eml, msg, raw email, the source]
+      - key: reporter
+        text: Note who reported it, when, and whether they interacted
+        aliases: [reporter, who reported, reporting user, submitter]
+      - key: handling
+        text: Open in a safe viewer — no images, no auto-preview, no clicks
+        aliases: [safe viewer, safe handling, preview off, handling]
+
+  - phase: Sender and routing
+    steps:
+      - key: headers
+        text: Pull full headers
+        aliases: [headers, full headers, message headers]
+      - key: fromspoof
+        text: Compare envelope From, display From, and Reply-To for mismatch
+        aliases: [from, reply to, reply-to, envelope, display name, mismatch,
+                  header mismatch]
+      - key: auth
+        text: SPF, DKIM and DMARC results in Authentication-Results
+        aliases: [spf, dkim, dmarc, authentication, auth results, email auth]
+      - key: received
+        text: Walk the Received chain — originating IP, does the path make sense
+        aliases: [received, received chain, hops, routing, originating ip,
+                  source ip]
+      - key: lookalike
+        text: Check for cousin/typosquat/homoglyph domain
+        aliases: [lookalike, cousin domain, typosquat, homoglyph, spoofed domain,
+                  similar domain]
+      - key: domainage
+        text: Domain registration date and WHOIS — newly registered is a flag
+        aliases: [domain age, whois, registration date, newly registered,
+                  domain registered]
+      - key: senderrep
+        text: Sender address and sending-IP reputation
+        aliases: [sender reputation, reputation, ip reputation, sender rep,
+                  blocklist, rbl]
+
+  - phase: Content and links
+    steps:
+      - key: lure
+        text: Characterise the lure — urgency, authority, payment, MFA prompt
+        aliases: [lure, pretext, social engineering, the ask, theme]
+      - key: impersonation
+        text: Check for internal display-name or brand impersonation
+        aliases: [impersonation, spoofing an exec, ceo fraud, brand, pretending]
+      - key: urls
+        text: Extract every URL defanged, including shorteners and redirects
+        aliases: [urls, links, extract urls, the links, defang]
+      - key: urlrep
+        text: URL reputation — sandbox detonation, URLScan, threat intel
+        aliases: [url reputation, urlscan, link reputation, check the links,
+                  detonate the url]
+      - key: landing
+        text: Identify the final landing page — credential harvest? which brand?
+        aliases: [landing page, final page, credential harvest, harvest page,
+                  fake login, login page]
+      - key: qr
+        text: Decode any QR code in the body — never scan it with your phone
+        aliases: [qr, qr code, quishing, barcode]
+
+  - phase: Attachments
+    steps:
+      - key: hash
+        text: SHA256 every attachment — hash it, do not open it
+        aliases: [hash, hashes, sha256, sha, checksum, attachment hash,
+                  hash the attachment]
+      - key: hashrep
+        text: Hash reputation and prior sightings in EDR
+        aliases: [hash reputation, edr, sightings, seen before, hash lookup]
+      - key: detonate
+        text: Detonate unknown attachments in the sandbox
+        aliases: [detonate, sandbox, sandbox it, explode, dynamic analysis]
+      - key: containers
+        text: Check for macros, OLE objects, HTML smuggling, ISO/archive wrappers
+        aliases: [macros, ole, html smuggling, iso, archive, container, zip,
+                  embedded objects]
+
+  - phase: Scope
+    steps:
+      - key: campaign
+        text: Search the mail gateway for every recipient of this campaign
+        aliases: [campaign, other recipients, who else got it, gateway search,
+                  scope, message trace]
+      - key: related
+        text: Hunt related messages by subject, sending infra, or hash
+        aliases: [related, related messages, similar, hunt, threat hunt]
+      - key: clicks
+        text: Did anyone click? Check proxy and DNS logs for the URL
+        aliases: [clicks, who clicked, proxy logs, dns logs, did anyone click]
+      - key: creds
+        text: Did anyone submit credentials? Check for auth from new IP or geo
+        aliases: [credentials, creds, did anyone enter, sign in logs,
+                  impossible travel, new geo, submitted credentials]
+      - key: persistence
+        text: Check affected mailboxes for new inbox or forwarding rules
+        aliases: [inbox rules, forwarding rules, mailbox rules, persistence,
+                  rules]
+
+  - phase: Containment
+    steps:
+      - key: purge
+        text: Purge or quarantine the message from all mailboxes
+        aliases: [purge, quarantine, remove it, pull it, soft delete]
+      - key: block
+        text: Block sender, domain, URL and hash at gateway, proxy and EDR
+        aliases: [block, blocks, blocklist, deny, block the sender,
+                  block the domain]
+      - key: reset
+        text: If credentials were submitted — reset password, revoke sessions
+              and tokens
+        aliases: [reset, password reset, revoke, revoke sessions, revoke tokens,
+                  disable account]
+      - key: verify
+        text: Verify the blocks actually took effect
+        aliases: [verify, verify blocks, confirm the block, did the block work]
+
+  - phase: Close-out
+    steps:
+      - key: verdict
+        text: Reach a verdict — malicious, suspicious, spam, or benign
+        aliases: [verdict, determination, conclusion, call it, decide]
+      - key: iocs
+        text: Record IOCs — domains, IPs, URLs, hashes
+        aliases: [iocs, ioc, indicators, artifacts, record the iocs]
+      - key: feedback
+        text: Tell the reporter what it was and thank them
+        # Deliberately no "thank them" here: it matches a bare "thanks",
+        # which is a thing said fifty times a day and never means this.
+        aliases: [feedback, tell the reporter, reply to the user,
+                  close the loop, let them know]
+
+# ----------------------------------------------------------------------
+# ADMIN — placeholder. Replace with your actual job requirements.
+# ----------------------------------------------------------------------
+admin:
+
+  - phase: Your tasks
+    steps:
+      - key: placeholder_ticket
+        text: "[placeholder] Open/update the ticket"
+        aliases: [ticket, the ticket, open the ticket, update the ticket]
+      - key: placeholder_report
+        text: "[placeholder] Write the investigation report"
+        aliases: [report, the report, write up, writeup, write the report]
+      - key: placeholder_form
+        text: "[placeholder] Fill out the form you have to fill out"
+        aliases: [form, the form, fill out the form, paperwork]
+      - key: placeholder_notify
+        text: "[placeholder] Send the notification email"
+        aliases: [notification, notify, notification email, send the email]
+      - key: placeholder_close
+        text: "[placeholder] Close the ticket with the right disposition"
+        aliases: [close the ticket, disposition, resolve the ticket]
