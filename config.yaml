@@ -346,6 +346,60 @@ router:
     - "look up"
     - "search"
   # Words that push a short request up to the mid tier anyway.
+  # Words that name something this appliance can DO.
+  #
+  # These requests are short — "print my shopping list", "show the board",
+  # "display full body A" — so the small_max_chars shortcut sends them to the
+  # cheap model, which then has to choose the right one out of forty-odd
+  # tools. It frequently does not.
+  #
+  # Found the hard way: "start today's workout" worked while "display full
+  # body A workout" did not, and the only difference was that the first
+  # contained "today" and got escalated by live_info_markers.
+  #
+  # Sonnet instead of Haiku on these costs a fraction of a cent and buys the
+  # right tool being called.
+  tool_markers:
+    - "workout"
+    - "exercise"
+    - "session"
+    - "lift"
+    - "rest timer"
+    - "case"
+    - "phishing"
+    - "investigation"
+    - "checklist"
+    - "sla"
+    - "print"
+    - "board"
+    - "list"
+    - "note"
+    - "remember"
+    - "forget"
+    - "recall"
+    - "timer"
+    - "remind"
+    - "dashboard"
+    - "screen"
+    - "display"
+    - "window"
+    - "volume"
+    - "memory"
+    # Lift names, for asking about history when no session is open —
+    # "what did I bench last time". While a session IS open the router
+    # escalates everything anyway, so these only matter outside one.
+    - "bench"
+    - "squat"
+    - "deadlift"
+    - "press"
+    - "curl"
+    - "row"
+    - "dip"
+    - "pull-up"
+    - "pullup"
+    - "swing"
+    - "carry"
+
   complexity_markers:
     - "why"
     - "explain"

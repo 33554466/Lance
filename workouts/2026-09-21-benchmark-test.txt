@@ -1,0 +1,38 @@
+# Benchmark Test
+
+// Week 2, Day 6. End of block testing. Four numbers, all of them max
+// effort, all of them going on the scorecard. Fully rested between
+// efforts, this is a test session and not a workout.
+//
+// Milestone targets for reference: 30 strict push-ups, 2 minutes 30
+// second plank, 90 second dead hang, farmer's carry 60 yards at
+// bodyweight total.
+//
+// NO running test. The calf has not cleared the gates and will not be
+// asked to. Do not improvise one.
+//
+// Report all four numbers plus this week's seven day average bodyweight,
+// waist at the navel, and your current single-leg heel raise count on
+// both legs.
+
+## Warm-up
+Air bike, easy, 5 minutes | rest 0
+Ninety ninety hip switches, 10 each side | rest 0
+Band pull-apart, 2 x 15 | rest 0
+Scap pull-ups, 2 x 8 from a dead hang | rest 0
+Push-ups easy, 1 x 8 at half effort | rest 120
+
+## A - Push-up max
+Push-up test, one set to technical failure, strict and chest to fist, log the number | rest 180
+
+## B - Hang
+Dead hang test, one set to failure, log the seconds | rest 180
+
+## C - Plank
+Front plank test, one set to failure, log the time | rest 180
+
+## D - Carry
+Farmer's carry test, one unbroken effort with 2 x 40 pounds, log the distance before you set them down | rest 0
+
+## Cool-down
+Incline treadmill walk, 20 minutes easy | rest 0

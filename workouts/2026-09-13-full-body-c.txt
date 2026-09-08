@@ -1,0 +1,31 @@
+# Full Body C
+
+// Week 1, Day 5. Swings today are a density progression, not a load one.
+// Same bell, one more set, shorter rest.
+//
+// NO jump rope in this warm-up. Rope comes back in Stage 3 of the Calf
+// Block and not one day before.
+//
+// LOG THE PUSH-UP NUMBER on E.
+
+## Warm-up
+Air bike, easy, 3 minutes | rest 0
+Wall ankle rocks, 15 each side | rest 0
+Goblet squat hold, 2 x 30 seconds at 30 pounds | rest 0
+Band pull-apart, 2 x 15 | rest 0
+
+## A - Swings
+KB swing, 6 x 12 at 50 pounds, RPE 7 | rest 60
+
+## B - Single leg
+Bulgarian split squat, 3 x 8 each side holding 18 to 30 pounds | rest 75
+
+## C - Upper pair
+C1 Dips, 3 x 6 to 10, bench dip regression if needed | rest 0
+C2 Band-assisted pull-ups, 3 x 6 | rest 90
+
+## D - Carry
+Suitcase carry, 3 x 40 yards each side at 40 pounds | rest 60
+
+## E - Test
+Push-up submaximal set, one set stopping two reps shy of failure, log the number | rest 0

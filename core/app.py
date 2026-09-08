@@ -512,7 +512,12 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
     async with _busy:
         _cancel.clear()
         await hub.to_display({"type": "transcript", "text": text})
-        route = router.route(text)
+        # An open case or workout means almost anything said next is aimed at
+        # the checklist, and those phrases carry no keyword — "185 for 5",
+        # "that's the dips". Knowing a session is open predicts it better than
+        # any word list could.
+        route = router.route(text,
+                             in_session=store.case_active() is not None)
         log.info("routed to %s (%s): %s", route.tier, route.reason, text[:60])
         await hub.broadcast_state("thinking", route.tier)
 
