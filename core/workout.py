@@ -113,6 +113,9 @@ class WorkoutTools:
     """start_workout / log_set / next_exercise / last_time / finish_workout."""
 
     _last_next: int | None = None
+    # The step most recently logged. "Rest" on its own has to mean "the rest
+    # that belongs to what I just did", and that is the only way to know.
+    _last_step: int | None = None
 
     def __init__(self, cfg: dict, store, cases=None):
         w = cfg.get("workouts", {}) or {}
@@ -286,6 +289,29 @@ class WorkoutTools:
                 },
             },
             {
+                "name": "start_rest",
+                "description": (
+                    "Start the rest countdown. Use ONLY when the user asks "
+                    "for it — 'rest', 'start the rest', 'start the timer', "
+                    "'ninety seconds'. With no seconds given it uses the rest "
+                    "written into the workout file for whatever they last "
+                    "logged. Never call this on your own after a set; they "
+                    "will say when they want it."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "seconds": {
+                            "type": "integer",
+                            "description": (
+                                "Only if they named a length. Otherwise omit "
+                                "and the file's own rest is used."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
                 "name": "next_exercise",
                 "description": (
                     "What is coming up in the session. Use for 'what's next', "
@@ -322,7 +348,7 @@ class WorkoutTools:
         ]
 
     _NAMES = {"start_workout", "log_set", "next_exercise", "last_time",
-              "finish_workout", "list_workouts"}
+              "finish_workout", "list_workouts", "start_rest"}
 
     def run_sync(self, name: str, args: dict) -> str | None:
         if name not in self._NAMES:
@@ -360,6 +386,8 @@ class WorkoutTools:
             return self._log(case, args)
         if name == "next_exercise":
             return self._next(case)
+        if name == "start_rest":
+            return self._rest(case, args)
         return self._finish(case)
 
     # -- operations --------------------------------------------------
@@ -435,20 +463,13 @@ class WorkoutTools:
         merged = f"{prior} / {result}" if prior and result else (result or prior)
         self.store.case_step_set(step["id"], done, merged or None)
 
+        self._last_step = step["id"]
         rest = self.store.case_step_rest(step["id"])
         if rest is None:
             rest = self.default_rest
         tail = ""
         if done and rest > 0 and self.announce_rest:
-            label = step["text"].split(",")[0].strip().lower()
-            # Replace, never stack. Three sets of bench schedule three rest
-            # timers otherwise, and the first two go off while you are under
-            # the bar for the third — which trains you to ignore the one that
-            # matters.
-            self.store.cancel_reminders(f"rest is up, {label}")
-            self.store.add_reminder(time.time() + rest,
-                                    f"rest is up, {label}", kind="timer")
-            tail = f" {rest} seconds."
+            tail = " " + self._rest_for(step, rest)
 
         rows = self.store.case_steps(case["id"], "workout")
         nxt = next((r for r in rows if not r["done"]), None)
@@ -463,6 +484,41 @@ class WorkoutTools:
             return f"{head}{tail}"
         self._last_next = nxt["id"]
         return f"{head}{tail} Next, {nxt['text'].split(',')[0]}."
+
+    def _rest_for(self, step, seconds: int) -> str:
+        """Schedule the rest countdown for one exercise. Returns what to say."""
+        label = step["text"].split(",")[0].strip().lower()
+        # Replace, never stack. Three sets of bench would otherwise schedule
+        # three timers, and the first two go off while you are under the bar
+        # for the third — which trains you to ignore the one that matters.
+        self.store.cancel_reminders(f"rest is up, {label}")
+        self.store.add_reminder(time.time() + seconds,
+                                f"rest is up, {label}", kind="timer")
+        return f"{seconds} seconds."
+
+    def _rest(self, case, args: dict) -> str:
+        """Start the rest on request rather than automatically."""
+        secs = args.get("seconds")
+        rows = self.store.case_steps(case["id"], "workout")
+        step = next((r for r in rows if r["id"] == self._last_step), None)
+        if step is None:
+            # Nothing logged this session yet — most likely a restart, or he
+            # is resting before starting. Fall back to the last DONE step, and
+            # then to the configured default.
+            step = next((r for r in reversed(rows) if r["done"]), None)
+        if step is None:
+            if secs:
+                self.store.add_reminder(time.time() + int(secs),
+                                        "rest is up", kind="timer")
+                return f"{int(secs)} seconds."
+            return "Log a set first and I will know how long to rest."
+        if secs:
+            seconds = int(secs)
+        else:
+            seconds = self.store.case_step_rest(step["id"])
+            if seconds is None or seconds <= 0:
+                seconds = self.default_rest
+        return self._rest_for(step, seconds)
 
     def _next(self, case) -> str:
         rows = [r for r in self.store.case_steps(case["id"], "workout")

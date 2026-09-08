@@ -291,7 +291,7 @@ workouts:
   # Logging a set starts the rest countdown automatically, so you never have
   # to say a second sentence with a bar in your hands. Set false if you would
   # rather ask for timers yourself.
-  announce_rest: true
+  announce_rest: false
 
 
 location:
@@ -574,7 +574,13 @@ context:
     finished set: "bench press one eighty five for five", "that's the dips",
     "rower done". Put whatever he said about weight and reps into the result —
     it is kept against the exercise and it is what makes "what did I lift last
-    time" work later. A rest timer starts on its own, so do not set one.
+    time" work later.
+
+    Do NOT start rest timers by yourself. When he wants one he will say so —
+    "rest", "start the rest", "start the timer", "ninety seconds" — and that
+    is when you call start_rest. With no length given it uses the rest written
+    into the workout file for whatever he last logged, so you do not need to
+    work it out or ask.
 
     Keep replies to a few words while he is training. He has a bar in his
     hands.
