@@ -376,7 +376,12 @@ class WorkoutTools:
                         f"{self.dir.name} and say it again.")
             if why:
                 return why          # rest day, or the programme has ended
-            return f"I cannot find a workout matching {args.get('name')!r}."
+            # Name what IS there rather than a bare miss. A mis-heard session
+            # name is the common case — "full workout A" for "Full Body A" —
+            # and the useful reply is the list, not a refusal.
+            have = ", ".join(self._label(p) for p in self._files()[:5])
+            return (f"I have no workout called {args.get('name')!r}. "
+                    f"I have: {have}.")
         try:
             title, steps = parse(path.read_text(), self.default_rest)
         except Exception as exc:  # noqa: BLE001
