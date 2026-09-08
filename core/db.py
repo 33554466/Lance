@@ -583,7 +583,14 @@ class Store:
         row = self.conn.execute(
             "SELECT rest_seconds FROM case_steps WHERE id = ?",
             (step_id,)).fetchone()
-        return int(row["rest_seconds"]) if row and row["rest_seconds"] else None
+        # `is not None`, not a truth test. Zero is a MEANING here — "no rest
+        # after this one" — and a falsy check turns it back into NULL, which
+        # then falls through to the default. That is the difference between a
+        # silent warm-up and ninety seconds of countdown after every ankle
+        # rock.
+        if row is None or row["rest_seconds"] is None:
+            return None
+        return int(row["rest_seconds"])
 
     def workout_history(self, exercise: str, limit: int = 5) -> list[sqlite3.Row]:
         """What was logged for this exercise in earlier sessions.

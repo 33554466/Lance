@@ -336,7 +336,9 @@ class WorkoutTools:
         merged = f"{prior} / {result}" if prior and result else (result or prior)
         self.store.case_step_set(step["id"], done, merged or None)
 
-        rest = self.store.case_step_rest(step["id"]) or self.default_rest
+        rest = self.store.case_step_rest(step["id"])
+        if rest is None:
+            rest = self.default_rest
         tail = ""
         if done and rest > 0 and self.announce_rest:
             label = step["text"].split(",")[0].strip().lower()

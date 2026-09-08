@@ -329,6 +329,17 @@ class CaseTools:
         top = scored[0][0]
         tied = [r for s, r in scored if s == top]
         if len(tied) > 1:
+            # Break the tie toward what is still OPEN before asking. Saying
+            # "pull-ups" when the warm-up scap pull-ups are already ticked off
+            # almost certainly means the working set, and a question there is
+            # friction for no information. Correcting a finished step is
+            # always phrased more specifically anyway ("put the scap pull-ups
+            # back"), which wins on length before it ever reaches here.
+            open_only = [r for r in tied if not r["done"]]
+            if len(open_only) == 1:
+                return open_only[0], []
+            if open_only:
+                tied = open_only
             return None, tied
         return tied[0], []
 
