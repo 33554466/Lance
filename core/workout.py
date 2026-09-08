@@ -38,6 +38,9 @@ from pathlib import Path
 
 log = logging.getLogger("assistant.workout")
 
+# A date anywhere in the filename turns a folder of files into a schedule.
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
 # "| rest 180", "| rest 180s", "| 180s", "| 180". The pipe is the marker: it
 # never occurs in an exercise name, so nothing is stripped by accident.
 _REST = re.compile(r"\|\s*(?:rest\s*)?(\d+)\s*s?\s*$", re.I)
@@ -132,17 +135,84 @@ class WorkoutTools:
                        (".txt", ".md", ".workout")),
                       key=lambda p: p.stat().st_mtime, reverse=True)
 
-    def _pick(self, name: str | None) -> Path | None:
+    @staticmethod
+    def _label(path: Path) -> str:
+        """The spoken name of a file: no date, no hyphens, no extension."""
+        stem = _DATE.sub("", path.stem).strip("-_ ")
+        return (stem.replace("-", " ").replace("_", " ").strip()
+                or path.stem.replace("-", " "))
+
+    def _dated(self, path: Path) -> str | None:
+        """The YYYY-MM-DD in a filename, if there is one."""
+        m = _DATE.search(path.name)
+        return m.group(0) if m else None
+
+    def _pick(self, name: str | None) -> tuple[Path | None, str]:
+        """(file, why). `why` is '' on a clean hit, or a sentence to say.
+
+        Selection changes shape once a whole programme is on the box. With one
+        or two ad-hoc files, "today's workout" sensibly means the newest one.
+        With a month of them dropped in at once, every file has the same
+        timestamp and "newest" is a coin toss — so a date in the filename wins
+        over the clock whenever one is present.
+        """
         files = self._files()
         if not files:
-            return None
-        if not name or not name.strip():
-            return files[0]          # newest — "today's workout"
-        want = re.sub(r"[^a-z0-9]+", "", name.lower())
-        for p in files:
-            if want and want in re.sub(r"[^a-z0-9]+", "", p.stem.lower()):
-                return p
-        return None
+            return None, ""
+
+        if name and name.strip():
+            want = re.sub(r"[^a-z0-9]+", "", name.lower())
+            for p in files:
+                if want and want in re.sub(r"[^a-z0-9]+", "", p.stem.lower()):
+                    return p, ""
+            return None, ""
+
+        today = time.strftime("%Y-%m-%d")
+        dated = sorted((p for p in files if self._dated(p) == today),
+                       key=lambda p: p.name)
+        if dated:
+            # Two sessions on one date is a double day, not a mistake. Take
+            # the one not already finished, so the second "start today's
+            # workout" opens the evening session rather than repeating the
+            # morning.
+            fresh = [p for p in dated if not self.store.workout_ran_today(p.name)]
+            if fresh:
+                return fresh[0], ""
+            return dated[0], "That one is already done today, restarting it. "
+
+        programme = [p for p in files if self._dated(p)]
+        if programme:
+            # A dated programme is installed and today is not in it — a rest
+            # day. Say so and name the next one rather than silently starting
+            # last Tuesday's session.
+            ahead = sorted((p for p in programme if (self._dated(p) or "") > today),
+                           key=lambda p: (self._dated(p) or "", p.name))
+            if ahead:
+                when = self._say_date(self._dated(ahead[0]))
+                return None, (f"Nothing scheduled today. Next is "
+                              f"{self._label(ahead[0])} {when}.")
+            return None, "Nothing scheduled today, and the programme has run out."
+
+        return files[0], ""      # undated folder: newest, as before
+
+    @staticmethod
+    def _say_date(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            t = time.strptime(iso, "%Y-%m-%d")
+        except ValueError:
+            return ""
+        days = (time.mktime(t) - time.mktime(
+            time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))) / 86400
+        if days <= 1:
+            return "tomorrow"
+        if days < 7:
+            return f"on {time.strftime('%A', t)}"
+        n = int(time.strftime("%-d", t))
+        suffix = ("th" if 11 <= n % 100 <= 13
+                  else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+        return f"on {time.strftime('%A', t)} the {n}{suffix}"
 
     # -- schemas -----------------------------------------------------
 
@@ -265,8 +335,21 @@ class WorkoutTools:
             files = self._files()
             if not files:
                 return f"No workout files in {self.dir}."
-            return (f"{len(files)}: "
-                    + ", ".join(p.stem.replace("-", " ") for p in files[:6]))
+            today = time.strftime("%Y-%m-%d")
+            ahead = sorted((p for p in files
+                            if (self._dated(p) or "") >= today),
+                           key=lambda p: (self._dated(p) or "", p.name))
+            if ahead:
+                parts = []
+                for p in ahead[:4]:
+                    d = self._dated(p)
+                    when = "today" if d == today else self._say_date(d)
+                    parts.append(f"{when}, {self._label(p)}")
+                more = len(ahead) - len(parts)
+                return ("Coming up: " + "; ".join(parts)
+                        + (f". And {more} more scheduled." if more > 0 else "."))
+            return (f"{len(files)} on file: "
+                    + ", ".join(self._label(p) for p in files[:6]))
         if name == "last_time":
             return self._last_time(args.get("exercise", ""))
 
@@ -286,31 +369,42 @@ class WorkoutTools:
         return case if case and case["kind"] == "workout" else None
 
     def _start(self, args: dict) -> str:
-        path = self._pick(args.get("name"))
+        path, why = self._pick(args.get("name"))
         if path is None:
             if not self._files():
                 return (f"There are no workout files. Drop one in "
                         f"{self.dir.name} and say it again.")
+            if why:
+                return why          # rest day, or the programme has ended
             return f"I cannot find a workout matching {args.get('name')!r}."
         try:
             title, steps = parse(path.read_text(), self.default_rest)
         except Exception as exc:  # noqa: BLE001
             return f"Could not read that workout: {type(exc).__name__}."
+        if title == "Workout":
+            # No "# " line in the file. Fall back to the filename with the
+            # date stripped, so a dated programme still announces "Full Body
+            # A" rather than eleven sessions all called "Workout".
+            title = self._label(path).title() or "Workout"
         if not steps:
             return f"{path.name} has no exercises in it."
 
         # No SLA on a workout. The case machinery wants a deadline; a training
         # session does not have one, and being told you are 75% through your
         # workout's allotted time is not a thing anybody wants shouted at them.
+        # The source filename goes in `ref`, which a workout has no other use
+        # for. It is what lets a double day know the morning session is
+        # already done.
         case_id = self.store.case_open("workout", title, "session", None,
-                                       None, steps)
+                                       path.name, steps)
         self.store.case_steps_set_rest(
             case_id, {s["key"]: s["rest"] for s in steps})
         phases = [s["phase"] for s in steps if s["phase"]]
         n_phase = len(dict.fromkeys(phases))
         log.info("workout %d: %s (%d exercises from %s)",
                  case_id, title, len(steps), path.name)
-        return (f"{title}. {len(steps)} exercises"
+        return (f"{why}{title}. {len(steps)} "
+                + ("exercise" if len(steps) == 1 else "exercises")
                 + (f" across {n_phase} sections" if n_phase > 1 else "")
                 + ", on screen.")
 

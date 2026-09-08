@@ -607,6 +607,19 @@ class Store:
             "  AND s.finding IS NOT NULL AND LOWER(s.text) LIKE ? "
             "ORDER BY c.opened DESC LIMIT ?", (needle, limit)).fetchall()
 
+    def workout_ran_today(self, filename: str) -> bool:
+        """Has this workout file already been started today?
+
+        Only meaningful for a dated programme with two sessions on one date:
+        it is what makes the second "start today's workout" open the evening
+        session instead of repeating the morning.
+        """
+        midnight = time.time() - (time.time() % 86400)
+        row = self.conn.execute(
+            "SELECT 1 FROM cases WHERE kind = 'workout' AND ref = ? "
+            "AND opened >= ? LIMIT 1", (filename, midnight)).fetchone()
+        return row is not None
+
     def case_note(self, case_id: int, text: str) -> None:
         row = self.case_get(case_id)
         prior = (row["notes"] if row else "") or ""
