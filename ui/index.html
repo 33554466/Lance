@@ -236,6 +236,16 @@
   .step.next .label { color: var(--text); font-weight: 400; }
   .step.next .box { color: var(--accent); }
 
+  /* One column means a workout: read from across a garage, mid-set, not from
+     a desk chair. Everything steps up a size and the current exercise is the
+     only thing at full brightness. */
+  #case-cols.solo .step { font-size: 1.5rem; padding: 0.35rem 0; }
+  #case-cols.solo .step .box { font-size: 1.3rem; }
+  #case-cols.solo .step .found { font-size: 1.15rem; }
+  #case-cols.solo .phase { font-size: 0.9rem; margin: 1.2rem 0 0.5rem; }
+  #case-cols.solo .case-col > h2 { font-size: 1.1rem; }
+  #case-cols.solo .step.next .label { font-size: 1.9rem; line-height: 1.15; }
+
   #case-foot {
     display: flex; gap: 1.5rem; align-items: baseline; color: var(--dim);
     font-size: 0.95rem; border-top: 1px solid #30363d; padding-top: 0.75rem;
@@ -595,10 +605,13 @@
     if (!caseData) return;
     const el = $("case-clock");
     if (!caseData.sla_due) {
-      el.textContent = "—";
+      // No deadline — a workout. Count UP instead. Session length is the
+      // number you want mid-set; "no SLA" tells you nothing.
+      const up = Date.now() / 1000 + caseSkew - caseData.opened;
+      el.textContent = fmtLeft(Math.max(0, up));
       el.className = "";
       const lbl = document.createElement("small");
-      lbl.textContent = "no sla"; el.appendChild(lbl);
+      lbl.textContent = "elapsed"; el.appendChild(lbl);
       return;
     }
     const now = Date.now() / 1000 + caseSkew;
@@ -624,10 +637,19 @@
 
     const cols = $("case-cols");
     cols.textContent = "";
-    [["investigation", "Investigation"], ["admin", "My tasks"]]
-      .forEach(([key, label]) => {
-        cols.appendChild(caseColumn(label, (d.sides || {})[key] || []));
-      });
+    // The server says which columns exist. A workout has one; an
+    // investigation has two. Hard-coding the pair here is what would put an
+    // empty "My tasks" panel next to your bench press.
+    const spec = d.columns
+      || [{key: "investigation", label: "Investigation"},
+          {key: "admin", label: "My tasks"}];
+    cols.style.gridTemplateColumns =
+      spec.length === 1 ? "minmax(0, 46rem)" : "repeat(" + spec.length + ", 1fr)";
+    cols.style.justifyContent = spec.length === 1 ? "center" : "stretch";
+    cols.classList.toggle("solo", spec.length === 1);
+    spec.forEach((c) => {
+      cols.appendChild(caseColumn(c.label, (d.sides || {})[c.key] || []));
+    });
 
     // Keep the step you are on in view. Only when something was actually
     // ticked — scrolling on every fifteen-second poll would yank the column

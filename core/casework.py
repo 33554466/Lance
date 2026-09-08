@@ -201,10 +201,16 @@ def human_over(seconds: float) -> str:
 # ---------------------------------------------------------------- tools
 
 _PUNCT = str.maketrans("", "", ".,!?;:\"'’")
+# Hyphens and slashes become spaces rather than vanishing. Nobody says the
+# hyphen in "band pull-aparts" or "Reply-To", so the spoken form arrives as
+# separate words; collapsing them to "pullaparts" matches nothing at all,
+# while splitting them matches exactly right.
+_BREAKS = str.maketrans("-/–—_", "     ")
 
 
 def normalise(text: str) -> str:
-    return " ".join(str(text).lower().translate(_PUNCT).split())
+    return " ".join(
+        str(text).lower().translate(_BREAKS).translate(_PUNCT).split())
 
 
 # Endings a word may pick up and still be the same word. Deliberately a closed

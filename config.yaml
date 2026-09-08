@@ -244,6 +244,32 @@ printer:
 
 
 
+workouts:
+  # Training sessions, run through the same checklist machinery as casework.
+  #
+  # A session is a FILE, not a playbook: drop a text file in the folder below
+  # and say "start today's workout". With no name it takes the newest file,
+  # which is also the answer to getting a workout in here without dictating it.
+  #
+  #     # Push Day A
+  #     ## Main
+  #     Bench press, 5 x 5 @ 185 | rest 180
+  #     Dips, 3 x AMRAP
+  #
+  # "# " is the title, "## " a section, everything else an exercise. The
+  # "| rest 180" tail is optional and falls back to the default below.
+  enabled: true
+  path: "~/assistant/workouts"
+
+  # Used when a line does not specify its own rest.
+  default_rest_seconds: 90
+
+  # Logging a set starts the rest countdown automatically, so you never have
+  # to say a second sentence with a bar in your hands. Set false if you would
+  # rather ask for timers yourself.
+  announce_rest: true
+
+
 location:
   # Passed to the search tool so "near me", "tonight" and local business
   # hours resolve correctly. It is a hint for the search engine, not

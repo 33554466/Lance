@@ -262,12 +262,25 @@ async def case():
     if not row:
         return JSONResponse({"active": False})
 
-    sides: dict[str, list] = {"investigation": [], "admin": []}
+    # Columns are DATA, not hard-coded. An investigation has two — what you
+    # look at, and what your employer wants — but a workout has one, and
+    # rendering a session next to an empty "My tasks" panel would be absurd.
+    # The page draws one column per side present, in this order.
+    LABELS = {"investigation": "Investigation", "admin": "My tasks",
+              "workout": "Session"}
+    sides: dict[str, list] = {}
     for s in store.case_steps(row["id"]):
         sides.setdefault(s["side"], []).append({
             "phase": s["phase"], "text": s["text"],
             "done": bool(s["done"]), "finding": s["finding"],
         })
+    if row["kind"] != "workout":
+        # Keep both panels for a case even when one is empty: an empty admin
+        # column is information, a missing one looks like a bug.
+        sides.setdefault("investigation", [])
+        sides.setdefault("admin", [])
+    columns = [{"key": k, "label": LABELS.get(k, k.title())}
+               for k in ("investigation", "admin", "workout") if k in sides]
     prog = store.case_progress(row["id"])
     return JSONResponse({
         "active": True,
@@ -282,6 +295,7 @@ async def case():
         "done_total": sum(d for d, _ in prog.values()),
         "step_total": sum(t for _, t in prog.values()),
         "sides": sides,
+        "columns": columns,
         "notes": row["notes"],
         "open_cases": len(store.cases_open()),
     })

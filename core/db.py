@@ -6,6 +6,7 @@ assistant can answer "what did I ask you about the insurance letter?".
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -135,7 +136,10 @@ CREATE TABLE IF NOT EXISTS case_steps (
     -- What he actually found. "sender domain registered four days ago" hangs
     -- off the step it belongs to, which is what makes the write-up at the end
     -- a transcription job rather than a memory test.
-    finding  TEXT
+    finding  TEXT,
+    -- Seconds to rest after this step. Only workouts use it; an
+    -- investigation step has no such thing, and NULL says so.
+    rest_seconds INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_case_steps
@@ -197,6 +201,41 @@ CREATE TABLE IF NOT EXISTS wake_events (
 """
 
 
+def fts_query(text: str) -> str | None:
+    """Turn what a person said into something FTS5 will accept.
+
+    FTS5 does not take a search string — it takes a QUERY EXPRESSION, with its
+    own operators and keywords. So the raw text of a question is a small
+    minefield:
+
+        "INC-4412"   -> no such column: 4412     (the hyphen)
+        "don't"      -> syntax error near "'"    (every contraction, ever)
+        "a:b"        -> no such column: a        (the colon)
+        "C++"        -> syntax error near "+"
+        "AND"        -> syntax error             (a bare keyword)
+        ""           -> syntax error
+
+    Speech is transcribed, so apostrophes arrive constantly and the failure is
+    a raw SQLite error read out loud. The fix is to stop passing user text as
+    syntax at all: pull out the alphanumeric tokens and quote each one, which
+    makes every character above a literal and every keyword an ordinary word.
+
+    Tokens stay space-separated, which FTS5 reads as AND. That is what you
+    want here: "INC 4412" should mean the message with both, not either. A
+    long natural question ANDs down to nothing, which is correct — keyword
+    search cannot answer those, and the semantic half is what does.
+
+    Returns None when there is nothing searchable, so callers skip the query
+    rather than handing FTS5 an empty string.
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", text or "")
+    if not tokens:
+        return None
+    # Trim absurd input rather than building a 500-term AND that matches
+    # nothing and takes a while to decide that.
+    return " ".join(f'"{t}"' for t in tokens[:24])
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -227,6 +266,16 @@ class Store:
                 log_msg = f"migrated: list_items.{name} added"
                 print(log_msg)
 
+        # case_steps.rest_seconds arrived with workouts, after the table
+        # already existed on a live box. CREATE TABLE IF NOT EXISTS will not
+        # add it, so it is added explicitly here, same as above.
+        step_cols = {r["name"] for r in
+                     self.conn.execute("PRAGMA table_info(case_steps)").fetchall()}
+        if step_cols and "rest_seconds" not in step_cols:
+            self.conn.execute(
+                "ALTER TABLE case_steps ADD COLUMN rest_seconds INTEGER")
+            print("migrated: case_steps.rest_seconds added")
+
     # -- messages ---------------------------------------------------
 
     def add_message(self, role: str, content: str,
@@ -256,11 +305,14 @@ class Store:
         return msgs
 
     def search(self, query: str, limit: int = 10) -> list[sqlite3.Row]:
+        match = fts_query(query)
+        if match is None:
+            return []
         return self.conn.execute(
             "SELECT m.ts, m.role, m.content FROM messages_fts f "
             "JOIN messages m ON m.id = f.rowid "
             "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit),
+            (match, limit),
         ).fetchall()
 
     def turns_since(self, since_ts: float, cap: int) -> list[dict[str, str]]:
@@ -521,6 +573,33 @@ class Store:
             "WHERE case_id = ? GROUP BY side", (case_id,)).fetchall()
         return {r["side"]: (int(r["d"] or 0), int(r["n"])) for r in rows}
 
+    def case_steps_set_rest(self, case_id: int, by_key: dict[str, int]) -> None:
+        self.conn.executemany(
+            "UPDATE case_steps SET rest_seconds = ? WHERE case_id = ? AND key = ?",
+            [(sec, case_id, key) for key, sec in by_key.items()])
+        self.conn.commit()
+
+    def case_step_rest(self, step_id: int) -> int | None:
+        row = self.conn.execute(
+            "SELECT rest_seconds FROM case_steps WHERE id = ?",
+            (step_id,)).fetchone()
+        return int(row["rest_seconds"]) if row and row["rest_seconds"] else None
+
+    def workout_history(self, exercise: str, limit: int = 5) -> list[sqlite3.Row]:
+        """What was logged for this exercise in earlier sessions.
+
+        No new table: a workout IS a case, so its history is already sitting
+        in case_steps. Closed sessions only — what you are lifting right now
+        is not "last time".
+        """
+        needle = f"%{' '.join(str(exercise).split()).strip().lower()}%"
+        return self.conn.execute(
+            "SELECT c.opened, s.text, s.finding FROM case_steps s "
+            "JOIN cases c ON c.id = s.case_id "
+            "WHERE c.kind = 'workout' AND c.closed IS NOT NULL "
+            "  AND s.finding IS NOT NULL AND LOWER(s.text) LIKE ? "
+            "ORDER BY c.opened DESC LIMIT ?", (needle, limit)).fetchall()
+
     def case_note(self, case_id: int, text: str) -> None:
         row = self.case_get(case_id)
         prior = (row["notes"] if row else "") or ""
@@ -624,10 +703,13 @@ class Store:
 
     def search_ids(self, query: str, limit: int = 20) -> list[int]:
         """Keyword hit IDs in relevance order, for the hybrid merge."""
+        match = fts_query(query)
+        if match is None:
+            return []
         rows = self.conn.execute(
             "SELECT f.rowid AS id FROM messages_fts f "
             "WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
-            (query, limit)).fetchall()
+            (match, limit)).fetchall()
         return [int(r["id"]) for r in rows]
 
     # -- usage ------------------------------------------------------

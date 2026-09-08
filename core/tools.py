@@ -915,6 +915,7 @@ from .desktop import DesktopTools
 from .casework import CaseTools
 from .printer import PrinterTools
 from .embed import Embedder, SemanticIndex
+from .workout import WorkoutTools
 
 
 class Toolbox:
@@ -935,11 +936,15 @@ class Toolbox:
         # not the one that was asked for.
         self.printer = PrinterTools(cfg, store, timers=self.timers,
                                     doctools=self.docs)
+        # Workouts borrow the case matcher: the same loose spoken-name
+        # matching that ticks off 'I purged it' ticks off 'bench done'.
+        self.workouts = WorkoutTools(cfg, store, cases=self.cases)
 
     def schemas(self) -> list[dict]:
         return (self.docs.schemas() + self.mem.schemas()
                 + self.timers.schemas() + self.desktop.schemas()
-                + self.cases.schemas() + self.printer.schemas())
+                + self.cases.schemas() + self.printer.schemas()
+                + self.workouts.schemas())
 
     def memory_block(self) -> str:
         return self.mem.block()
@@ -953,7 +958,8 @@ class Toolbox:
             return f"That failed: {type(exc).__name__}: {exc}"
 
     def _run_sync(self, name: str, args: dict) -> str:
-        for handler in (self.printer.run_sync, self.cases.run_sync,
+        for handler in (self.workouts.run_sync, self.printer.run_sync,
+                        self.cases.run_sync,
                         self.desktop.run_sync, self.timers.run_sync,
                         self.mem.run_sync):
             out = handler(name, args)

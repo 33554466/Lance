@@ -25,9 +25,15 @@ from pathlib import Path
 # fails with ModuleNotFoundError even though everything is correctly
 # installed. Fixing it here rather than in the instructions, because the
 # instructions are not what people type.
-_VENV = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python"
-if _VENV.exists() and Path(sys.executable).resolve() != _VENV.resolve():
-    os.execv(str(_VENV), [str(_VENV), str(Path(__file__).resolve()), *sys.argv[1:]])
+# NB: compare sys.prefix, NOT the resolved interpreter path. A venv's
+# bin/python is a SYMLINK to the base interpreter, so .resolve() collapses
+# both sides to /usr/bin/python3.12 and the guard silently decides it is
+# already in the venv. sys.prefix is the venv directory inside a venv and
+# /usr outside it, which is the distinction that actually matters.
+_VENV = Path(__file__).resolve().parent.parent / ".venv"
+_PY = _VENV / "bin" / "python"
+if _PY.exists() and Path(sys.prefix) != _VENV:
+    os.execv(str(_PY), [str(_PY), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
