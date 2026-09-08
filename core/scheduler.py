@@ -85,6 +85,7 @@ class Scheduler:
         self.chime = bool(cfg.get("behaviour", {}).get("reminder_chime", True))
         self.cases_on = bool((cfg.get("casework", {}) or {}).get("enabled", False))
         self.sla = Sla(cfg)
+        self.sweep = None      # set by app.py, which owns the toolbox
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -110,6 +111,27 @@ class Scheduler:
         await self._reminder_tick()
         if self.cases_on:
             await self._sla_tick()
+        self._sweep_tick()
+
+    def _sweep_tick(self) -> None:
+        """Look for memories that have quietly gone stale.
+
+        Cheap enough to sit on the one-second tick: `due()` is a subtraction,
+        and the sweep itself only runs once a day. When it does run it is two
+        SQL queries over a few dozen rows — no model call, no network. That is
+        what makes an always-on sweep affordable rather than a thing you
+        remember to switch on.
+
+        It flags and never edits, so there is nothing here to announce. What
+        it finds surfaces on the dashboard and when you ask.
+        """
+        sweep = getattr(self, "sweep", None)
+        if sweep is None or not sweep.due():
+            return
+        try:
+            sweep.run()
+        except Exception:  # noqa: BLE001
+            log.exception("memory sweep failed — continuing")
 
     async def _sla_tick(self) -> None:
         """Speak up as an investigation's deadline approaches.

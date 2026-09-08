@@ -144,6 +144,30 @@ memory:
   # retrieval, not injection.
   max_facts: 200
 
+  # Memories age. A fact that WAS true is the dangerous kind: it embeds
+  # perfectly, retrieves at the top, and gets stated with total confidence
+  # long after it stopped being so. Nothing in a conversation ever says
+  # "by the way, that is out of date now", so nothing event-driven can catch
+  # it. This is the clock that does.
+  sweep:
+    enabled: true
+
+    # Once a day is plenty. The check itself is two SQL queries over a few
+    # dozen rows — no model call, no network — so the cost is not the reason
+    # for the interval; nagging is.
+    every_hours: 24
+
+    # Belief below this gets flagged. ONE number, used by both the sweep and
+    # the prompt block: two subsystems with two definitions of "stale" will
+    # contradict each other in front of you. 0.35 is about a
+    # half-life-and-a-half, which is late enough to mean something.
+    fresh_floor: 0.35
+
+  # Freeze the clock to demonstrate decay without waiting for it. An ISO date
+  # here makes every ageing calculation pretend it is that day. Leave empty
+  # for normal running — this is a debugging switch, not a setting.
+  clock_at: ""
+
   # Semantic recall. The keyword search is kept — this runs alongside it.
   #
   # Keyword finds "INC-4412" and surnames. Meaning finds "the roof" in a

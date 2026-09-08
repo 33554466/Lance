@@ -281,7 +281,10 @@ class MemoryTools:
     and the model still cannot find anything.
     """
 
-    def __init__(self, cfg: dict, store, index=None):
+    def __init__(self, cfg: dict, store, index=None, clock=None):
+        # One module knows what time it is; this receives it. Without that,
+        # decay can only be observed by waiting for it.
+        self.clock = clock
         # Semantic index, when one is available. Optional on purpose:
         # every path below has to keep working when the embedding
         # model is missing, because it is a 69 MB download that can
@@ -292,22 +295,97 @@ class MemoryTools:
         self.max_facts = int(m.get("max_facts", 200))
         self.store = store
 
+    def _now(self) -> float:
+        return self.clock.now() if self.clock else _t.time()
+
+    def _match_memory(self, phrase: str) -> int | None:
+        """Find the live memory a phrase refers to. Three passes.
+
+        Semantic first when the index is up, then a literal substring, then
+        word overlap. The third pass matters more than it looks: the phrase
+        the model supplies for `replaces` is a paraphrase of the old fact, not
+        a quotation of it, so "voice is en_GB-semaine" has to reach "Brendan's
+        voice on the assistant is en_GB-semaine-medium". A bare LIKE never
+        will.
+        """
+        phrase = (phrase or "").strip()
+        if not phrase:
+            return None
+        rows = self.store.list_memories()
+        if not rows:
+            return None
+
+        if self.index is not None and self.index.embedder.available:
+            hits = self.index.similar(phrase, kind="memory", limit=1,
+                                      floor=0.55)
+            live = {r["id"] for r in rows}
+            if hits and hits[0][0] in live:
+                return hits[0][0]
+
+        needle = phrase.lower()
+        for r in rows:
+            if needle in r["text"].lower():
+                return r["id"]
+
+        # Word overlap, ignoring the filler that appears in every sentence.
+        stop = {"the", "a", "an", "is", "was", "are", "to", "of", "on", "in",
+                "for", "and", "his", "her", "their", "my", "that", "it"}
+        want = {w for w in re.findall(r"[a-z0-9]+", needle) if w not in stop}
+        if not want:
+            return None
+        best, best_score = None, 0.0
+        for r in rows:
+            have = {w for w in re.findall(r"[a-z0-9]+", r["text"].lower())
+                    if w not in stop}
+            if not have:
+                continue
+            overlap = len(want & have) / len(want)
+            if overlap > best_score:
+                best, best_score = r["id"], overlap
+        # Over half the meaningful words. Below that it is a guess, and a
+        # wrong guess retires a fact the user never meant to touch.
+        return best if best_score >= 0.6 else None
+
+    def _reindex(self, fact: str) -> None:
+        """Embed a newly written fact straight away.
+
+        The status of a superseded row changed, and `block()` and the index
+        must agree about which memories are live. A row the store considers
+        retired while the index still offers it is a confidently stated stale
+        memory — the exact failure this whole change exists to prevent.
+        """
+        if self.index is None:
+            return
+        row = next((r for r in self.store.list_memories()
+                    if r["text"] == fact), None)
+        if row is not None:
+            self.index.index("memory", [(row["id"], fact)])
+
     def block(self) -> str:
-        """The facts, formatted for the system prompt. Empty when there are
-        none, so a fresh install carries no dead weight."""
+        """The remembered-facts block that goes into every request.
+
+        Stale facts are INCLUDED, not hidden — a fact that has gone quiet is
+        usually still true, and dropping it would lose more than it saves. It
+        is marked instead, so the model hedges or asks rather than asserting.
+        That marker is the entire user-visible payoff of the whole sweep.
+        """
         if not self.enabled:
             return ""
         rows = self.store.list_memories()
         if not rows:
             return ""
+        now = self._now()
         by_cat: dict[str, list[str]] = {}
         for r in rows:
-            by_cat.setdefault(r["category"] or "general", []).append(r["text"])
-        out = ["What you know about this household, remembered from earlier "
-               "conversations:"]
+            line = r["text"]
+            if r["status"] == "stale":
+                days = int(age_days(r, now))
+                line += f"  (unconfirmed for {days} days — check before relying on it)"
+            by_cat.setdefault(r["category"], []).append(line)
+        out = []
         for cat in sorted(by_cat):
-            out.append(f"\n{cat}:")
-            out.extend(f"  - {t}" for t in by_cat[cat])
+            out.append(f"{cat}:")
+            out += [f"  - {t}" for t in by_cat[cat]]
         return "\n".join(out)
 
     def schemas(self) -> list[dict]:
@@ -343,6 +421,32 @@ class MemoryTools:
                                 "routines, or general."
                             ),
                         },
+                        "volatility": {
+                            "type": "string",
+                            "enum": ["stable", "slow", "fast"],
+                            "description": (
+                                "How fast this kind of fact goes out of date. "
+                                "'stable' for things that essentially never "
+                                "change — a birthday, a device ID, a "
+                                "preference. 'slow' for jobs, addresses, "
+                                "equipment, policies. 'fast' for a current "
+                                "project or anything tied to the next few "
+                                "weeks. Default slow."
+                            ),
+                        },
+                        "replaces": {
+                            "type": "string",
+                            "description": (
+                                "If this CORRECTS something already "
+                                "remembered, give the old fact in a few words "
+                                "so it can be retired. The old one is kept "
+                                "with its dates closed, never deleted, so "
+                                "'what did I think before' still answers. "
+                                "Leave this out when the new fact simply sits "
+                                "alongside the old — two things can both be "
+                                "true."
+                            ),
+                        },
                     },
                     "required": ["fact"],
                 },
@@ -363,6 +467,48 @@ class MemoryTools:
                             "description": "Text to match against stored facts.",
                         },
                     },
+                    "required": ["about"],
+                },
+            },
+            {
+                "name": "confirm_fact",
+                "description": (
+                    "Mark a remembered fact as still true. Use when the user "
+                    "confirms something you flagged as unconfirmed, or "
+                    "restates a fact you already hold. This resets its "
+                    "freshness — it is how a long-standing fact stays "
+                    "trusted instead of slowly going grey."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "about": {"type": "string",
+                                  "description": "A few words identifying it."},
+                    },
+                    "required": ["about"],
+                },
+            },
+            {
+                "name": "stale_facts",
+                "description": (
+                    "The remembered facts that have gone unconfirmed long "
+                    "enough to doubt. Use when the user asks what needs "
+                    "checking, what might be out of date, or to review what "
+                    "you know. Read back at most three and offer the rest."
+                ),
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "fact_history",
+                "description": (
+                    "What was previously believed about something, including "
+                    "facts that have since been corrected or retired. Use for "
+                    "'what did I have that set to before', 'what did you used "
+                    "to think', 'when did that change'."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"about": {"type": "string"}},
                     "required": ["about"],
                 },
             },
@@ -406,18 +552,48 @@ class MemoryTools:
             # catches character-identical entries, so "his daughter plays
             # soccer" and "Brendan's daughter is on a soccer team" both land,
             # and both then ride along in every future prompt forever.
-            if self.index is not None:
+            now = self._now()
+            # A near-identical fact is EVIDENCE, not a duplicate to reject.
+            # Restating something you already know means it is still true, so
+            # the honest response is to refresh its clock.
+            if self.index is not None and not args.get("replaces"):
                 dup = self.index.duplicate_of(fact)
                 if dup is not None:
-                    rows = [r for r in self.store.list_memories()
-                            if r["id"] == dup]
-                    if rows:
-                        log.info("memory duplicate of #%d: %s", dup, fact)
-                        return ("Already known, near enough: "
-                                f"{rows[0]['text']}")
+                    row = next((r for r in self.store.list_memories()
+                                if r["id"] == dup), None)
+                    if row is not None:
+                        self.store.confirm_memory(dup, now)
+                        log.info("memory confirmed #%d: %s", dup, fact)
+                        return f"Already knew that. Confirmed: {row['text']}"
+
+            # An explicit correction retires the old fact rather than
+            # overwriting it — its window closes, and it stays answerable.
+            replaces_id = None
+            if args.get("replaces"):
+                replaces_id = self._match_memory(str(args["replaces"]))
+                if replaces_id is None:
+                    # Refusing is the right failure. Storing it anyway leaves
+                    # two contradictory facts live, both going into every
+                    # future prompt — which is worse than the staleness this
+                    # whole design is here to prevent.
+                    return (f"I could not find a stored fact matching "
+                            f"{args['replaces']!r}, so I have not saved this "
+                            f"one — it would have contradicted whatever is "
+                            f"actually there. Tell me which to replace.")
+
             what = self.store.add_memory(
-                fact, (args.get("category") or "general").strip().lower())
+                fact, (args.get("category") or "general").strip().lower(),
+                volatility=(args.get("volatility") or "slow"),
+                now=now, replaces_id=replaces_id)
             log.info("memory %s: %s", what, fact)
+            if what == "replaced":
+                old_row = self.store.conn.execute(
+                    "SELECT text FROM memories WHERE superseded_by = "
+                    "(SELECT MAX(id) FROM memories)").fetchone()
+                self._reindex(fact)
+                return ("Updated. I had "
+                        + (f"{old_row['text']!r}" if old_row else "the old one")
+                        + ", and I have kept it dated rather than deleted.")
             if self.index is not None:
                 row = next((r for r in self.store.list_memories()
                             if r["text"] == fact), None)
@@ -435,11 +611,57 @@ class MemoryTools:
             rows = self.store.find_memories(about)
             if not rows:
                 return f"Nothing remembered matching {about!r}."
-            removed = [r["text"] for r in rows
-                       if self.store.delete_memory(r["id"])]
-            log.info("forgot %d: %s", len(removed), "; ".join(removed))
-            return ("Forgotten: " + "; ".join(removed)) if removed \
-                else "Nothing was removed."
+            now = self._now()
+            # "Forget that" means "stop telling me that", not "destroy the
+            # record it was ever so". The window closes; the row stays.
+            gone = [r["text"] for r in rows
+                    if self.store.expire_memory(r["id"], now, "user asked")]
+            log.info("retired %d: %s", len(gone), "; ".join(gone))
+            return ("Retired: " + "; ".join(gone)) if gone \
+                else "Nothing matched."
+
+        if name == "confirm_fact":
+            about = (args.get("about") or "").strip()
+            rows = self.store.find_memories(about, limit=1)
+            if not rows and self.index is not None:
+                hits = self.index.similar(about, kind="memory", limit=1,
+                                          floor=0.5)
+                rows = [r for r in self.store.list_memories()
+                        if hits and r["id"] == hits[0][0]]
+            if not rows:
+                return f"Nothing remembered matching {about!r}."
+            self.store.confirm_memory(rows[0]["id"], self._now())
+            return f"Confirmed: {rows[0]['text']}"
+
+        if name == "stale_facts":
+            now = self._now()
+            rows = [r for r in self.store.list_memories()
+                    if r["status"] == "stale"]
+            if not rows:
+                return "Nothing needs checking. Everything is current."
+            parts = []
+            for r in rows[:3]:
+                parts.append(f"{r['text']} — {int(age_days(r, now))} days")
+            more = len(rows) - len(parts)
+            return (f"{len(rows)} to check: " + "; ".join(parts)
+                    + (f". And {more} more." if more > 0 else "."))
+
+        if name == "fact_history":
+            about = (args.get("about") or "").strip()
+            rows = self.store.memory_history(about)
+            if not rows:
+                return f"No history for {about!r}."
+            out = []
+            for r in rows:
+                when = _dt.datetime.fromtimestamp(
+                    r["valid_from"]).strftime("%d %b")
+                mark = {"active": "now", "stale": "now, unconfirmed",
+                        "superseded": "until "
+                        + (_dt.datetime.fromtimestamp(r["valid_to"]).strftime("%d %b")
+                           if r["valid_to"] else "?"),
+                        "expired": "ended"}.get(r["status"], r["status"])
+                out.append(f"from {when}, {mark}: {r['text']}")
+            return " | ".join(out)
 
         if name == "recall":
             query = (args.get("query") or "").strip()
@@ -916,6 +1138,8 @@ from .casework import CaseTools
 from .printer import PrinterTools
 from .embed import Embedder, SemanticIndex
 from .workout import WorkoutTools
+from .clock import days_between, make_clock
+from .sweep import Sweep, age_days, score
 
 
 class Toolbox:
@@ -925,7 +1149,12 @@ class Toolbox:
         self.docs = DocumentTools(cfg)
         self.embedder = Embedder(cfg)
         self.index = SemanticIndex(store, self.embedder)
-        self.mem = MemoryTools(cfg, store, index=self.index)
+        # One clock, passed down. `memory.clock_at` in config freezes it,
+        # which is how a year of decay gets demonstrated in a second.
+        self.clock = make_clock(
+            (cfg.get("memory", {}) or {}).get("clock_at") or None)
+        self.mem = MemoryTools(cfg, store, index=self.index, clock=self.clock)
+        self.sweep = Sweep(store, cfg, clock=self.clock)
         self.timers = TimerTools(cfg, store)
         self.desktop = DesktopTools(cfg)
         self.cases = CaseTools(cfg, store)

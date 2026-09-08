@@ -35,6 +35,21 @@ log = logging.getLogger("assistant.core")
 # latency win — without it you wait for the whole reply before hearing a word.
 SENTENCE_END = re.compile(r'(?<=[.!?])\s+|(?<=[.!?]["”])\s+')
 
+# Tools whose effect is VISUAL as well as spoken. Anything that opens, ticks
+# off, or asks about a case or a workout has to push the checklist to the
+# screen — the tool's own reply says "on screen", and a reply that says that
+# while the display shows a clock is worse than saying nothing at all.
+#
+# Named up here rather than inline at the call site because this list has to
+# grow every time a tool is added, and the version buried in the handler was
+# missed when workouts were built on top of the case machinery.
+SHOWS_CASE = frozenset({
+    "start_case", "check_step", "uncheck_step", "case_status",
+    "case_next", "case_note", "show_case",
+    "start_workout", "log_set", "next_exercise",
+})
+SHOWS_NOTHING = frozenset({"close_case", "finish_workout"})
+
 
 def load_config() -> dict:
     with open(ROOT / "config.yaml") as fh:
@@ -85,6 +100,9 @@ router = Router(cfg)
 local_tools = build_tools(cfg, store)
 ctx = ContextBuilder(cfg, store, local_tools)
 scheduler = Scheduler(store, hub, cfg)
+# The sweep lives on the toolbox (it needs the same clock the memory tools
+# use) and runs on the scheduler's tick. One clock, one definition of stale.
+scheduler.sweep = local_tools.sweep
 _provider = None          # built lazily so the app starts without a key
 _busy = asyncio.Lock()
 _filler_n = 0             # rotates the "one moment" phrases
@@ -338,6 +356,30 @@ async def show_list(name: str = "shopping"):
     rows = store.list_read(name)
     return JSONResponse({"list": name, "count": len(rows),
                          "items": [r["text"] for r in rows]})
+
+
+@app.get("/memory/review")
+async def memory_review():
+    """Facts that have gone unconfirmed long enough to be worth checking.
+
+    The sweep flags; it never edits. This is where what it flagged waits for
+    you — nothing rewrites a fact about your household without you seeing it.
+    """
+    try:
+        return JSONResponse({
+            "stale": local_tools.sweep.review(),
+            "recent_repairs": [
+                {"at": time.strftime("%Y-%m-%d %H:%M",
+                                     time.localtime(r["at"])),
+                 "op": r["op"], "detector": r["detector"],
+                 "before": r["before_text"], "after": r["after_text"],
+                 "reason": r["reason"]}
+                for r in store.memory_repairs(limit=15)
+            ],
+        })
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"},
+                            status_code=500)
 
 
 @app.get("/memory/index")
@@ -621,11 +663,9 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
             # Anything that touched the case redraws the checklist. Ticking a
             # step off and not seeing it go grey is the kind of small silence
             # that makes you stop trusting the screen.
-            if any(c in ("start_case", "check_step", "uncheck_step",
-                         "case_status", "case_next", "case_note", "show_case")
-                   for c in reply.tool_calls):
+            if SHOWS_CASE.intersection(reply.tool_calls):
                 await hub.to_display({"type": "show_case"})
-            if "close_case" in reply.tool_calls:
+            if SHOWS_NOTHING.intersection(reply.tool_calls):
                 await hub.to_display({"type": "hide_case"})
 
         await hub.broadcast_state("idle")

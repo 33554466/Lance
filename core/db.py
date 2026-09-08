@@ -48,13 +48,74 @@ END;
 -- UNIQUE on text so saving the same fact twice updates rather than
 -- duplicates. Nothing is more tiresome than an assistant that remembers
 -- your coffee order four times.
+-- A memory is not a row. It is an interval with a belief attached.
+--
+-- The dangerous memory is not the one that was never true — that contradicts
+-- something, retrieval scores it badly, and a user corrects it. It is the one
+-- that WAS true. "The voice is lessac" was right for weeks. It embeds
+-- perfectly, retrieves at the top, and gets stated with total confidence long
+-- after it stopped being so.
+--
+-- Two columns fix the first half: valid_from/valid_to make a memory a window
+-- rather than a value, so a correction CLOSES the old row instead of erasing
+-- it. "What did I have the voice set to before?" stays answerable.
+--
+-- last_verified fixes the second half. Age is measured from EVIDENCE, not
+-- from first contact: a fact learned a year ago and confirmed last week is
+-- fresh, while one learned last week and never mentioned since is starting to
+-- rot. Measuring from `created` punishes long-standing facts that keep being
+-- re-confirmed, which is exactly backwards.
+--
+-- Note what is absent: nothing here is ever DELETED. That is the single
+-- decision the rest of this design exists to protect.
 CREATE TABLE IF NOT EXISTS memories (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    created  REAL NOT NULL,
-    updated  REAL NOT NULL,
-    category TEXT NOT NULL DEFAULT 'general',
-    text     TEXT NOT NULL UNIQUE
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created       REAL NOT NULL,
+    updated       REAL NOT NULL,
+    category      TEXT NOT NULL DEFAULT 'general',
+    text          TEXT NOT NULL,
+    -- How fast this kind of fact goes bad. Drives the half-life.
+    volatility    TEXT NOT NULL DEFAULT 'slow'
+                  CHECK (volatility IN ('stable', 'slow', 'fast')),
+    -- Valid time: when the fact was true in the world. NULL end = still open.
+    valid_from    REAL NOT NULL,
+    valid_to      REAL,
+    -- When we last had evidence it still holds.
+    last_verified REAL NOT NULL,
+    --   active      believed, and fresh
+    --   stale       believed, but past its half-life. Still retrieved, flagged.
+    --   superseded  replaced; its successor is the live one
+    --   expired     ended, and nothing succeeds it
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'stale', 'superseded', 'expired')),
+    superseded_by INTEGER REFERENCES memories(id)
 );
+
+-- UNIQUE on live rows only. The old column-level UNIQUE made it impossible to
+-- ever hold a fact that had been true, stopped being true, and became true
+-- again — which is a thing that happens.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_live
+    ON memories(text) WHERE status IN ('active', 'stale');
+CREATE INDEX IF NOT EXISTS idx_memories_status
+    ON memories(status, last_verified);
+
+-- Append-only. Rows are never rewritten, so this is the record of every
+-- change a memory has been through and what decided it.
+CREATE TABLE IF NOT EXISTS memory_repairs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          REAL NOT NULL,
+    op          TEXT NOT NULL
+                CHECK (op IN ('insert','supersede','expire','confirm','flag')),
+    detector    TEXT NOT NULL
+                CHECK (detector IN ('arrival','aged','scheduled','human')),
+    old_id      INTEGER,
+    new_id      INTEGER,
+    before_text TEXT,
+    after_text  TEXT,
+    reason      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_repairs_at ON memory_repairs(at);
 
 -- Timers and reminders. Persisted deliberately: a kitchen timer that
 -- forgets itself when the service restarts is not a kitchen timer, and
@@ -244,6 +305,11 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # BEFORE the schema script. The new memories table carries a partial
+        # unique index predicated on `status`, and running that against a
+        # pre-migration table fails with "no such column: status". The
+        # rebuild has to clear the way first.
+        self._migrate_memories()
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()
@@ -275,6 +341,64 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE case_steps ADD COLUMN rest_seconds INTEGER")
             print("migrated: case_steps.rest_seconds added")
+
+    def _migrate_memories(self) -> None:
+        """Give existing memories a validity window and a freshness clock.
+
+        This one cannot be done with ALTER TABLE alone. The old schema put
+        UNIQUE directly on `text`, and superseding needs that gone — a fact
+        that was true, stopped being true, and became true again is a real
+        thing, and a column-level constraint makes it unstorable. SQLite
+        cannot drop a constraint, so the table is rebuilt.
+
+        Rebuilding a table of real household facts deserves care, so: one
+        transaction, ids preserved (the embeddings table references them),
+        row counts compared before anything is dropped, and a rollback if
+        they disagree.
+        """
+        cols = {r["name"] for r in
+                self.conn.execute("PRAGMA table_info(memories)").fetchall()}
+        if not cols or "volatility" in cols:
+            return                      # fresh database, or already done
+
+        before = int(self.conn.execute(
+            "SELECT COUNT(*) AS n FROM memories").fetchone()["n"])
+        print(f"migrating {before} memories to windowed form...")
+        now = time.time()
+        try:
+            self.conn.execute("BEGIN")
+            self.conn.execute("ALTER TABLE memories RENAME TO memories_v1")
+            # Re-run the schema to build the new table and its indexes.
+            self.conn.executescript(SCHEMA)
+            self.conn.execute(
+                "INSERT INTO memories (id, created, updated, category, text,"
+                " volatility, valid_from, valid_to, last_verified, status,"
+                " superseded_by) "
+                # `updated` becomes last_verified: it is the closest thing the
+                # old schema has to "when we last had evidence for this".
+                # valid_from is `created` — we do not know when the fact
+                # became true, only when we heard it, and that is the honest
+                # lower bound.
+                "SELECT id, created, updated, category, text,"
+                " 'slow', created, NULL, updated, 'active', NULL "
+                "FROM memories_v1")
+            after = int(self.conn.execute(
+                "SELECT COUNT(*) AS n FROM memories").fetchone()["n"])
+            if after != before:
+                raise RuntimeError(
+                    f"row count changed: {before} -> {after}")
+            self.conn.execute("DROP TABLE memories_v1")
+            self.conn.execute("COMMIT")
+            print(f"migrated: {after} memories, none lost")
+            self.conn.execute(
+                "INSERT INTO memory_repairs (at, op, detector, reason) "
+                "VALUES (?, 'confirm', 'human', ?)",
+                (now, f"migrated {after} memories to windowed form"))
+            self.conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            self.conn.execute("ROLLBACK")
+            print(f"memory migration FAILED and was rolled back: {exc}")
+            raise
 
     # -- messages ---------------------------------------------------
 
@@ -335,43 +459,164 @@ class Store:
 
     # -- memories ---------------------------------------------------
 
-    def add_memory(self, text: str, category: str = "general") -> str:
-        """Insert or update. Returns 'saved' or 'updated'."""
-        now, text = time.time(), text.strip()
-        # rowcount is 1 for both the insert and the update path, so it cannot
-        # tell us which happened. Ask first — it is one indexed lookup, and
-        # the answer is what the user hears.
-        existed = self.conn.execute(
-            "SELECT 1 FROM memories WHERE text = ?", (text,)).fetchone()
-        self.conn.execute(
-            "INSERT INTO memories (created, updated, category, text) "
-            "VALUES (?,?,?,?) ON CONFLICT(text) DO UPDATE SET "
-            "updated=excluded.updated, category=excluded.category",
-            (now, now, category, text),
-        )
-        self.conn.commit()
-        return "updated" if existed else "saved"
+    LIVE = ("active", "stale")
 
-    def list_memories(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT id, category, text, updated FROM memories "
-            "ORDER BY category, id"
-        ).fetchall()
+    def _repair(self, op: str, detector: str, reason: str = "",
+                old_id: int | None = None, new_id: int | None = None,
+                before: str | None = None, after: str | None = None,
+                now: float | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO memory_repairs (at, op, detector, old_id, new_id,"
+            " before_text, after_text, reason) VALUES (?,?,?,?,?,?,?,?)",
+            (now or time.time(), op, detector, old_id, new_id,
+             before, after, reason))
+
+    def add_memory(self, text: str, category: str = "general",
+                   volatility: str = "slow", now: float | None = None,
+                   replaces_id: int | None = None) -> str:
+        """Store a fact. Returns 'saved', 'replaced', or 'confirmed'.
+
+        Three outcomes, not two, and the third is the interesting one. Saying
+        a fact that is already stored is EVIDENCE it still holds — so it
+        refreshes the verification clock rather than being a no-op. That is
+        what stops a fact you mention weekly from ever going stale, and it
+        costs nothing.
+        """
+        now = now or time.time()
+        text = text.strip()
+        if volatility not in ("stable", "slow", "fast"):
+            volatility = "slow"
+
+        existing = self.conn.execute(
+            f"SELECT id FROM memories WHERE text = ? AND status IN {self.LIVE}",
+            (text,)).fetchone()
+        if existing:
+            self.conn.execute(
+                "UPDATE memories SET last_verified = ?, updated = ?, "
+                "status = 'active', category = ? WHERE id = ?",
+                (now, now, category, existing["id"]))
+            self._repair("confirm", "arrival", "restated by the user",
+                         old_id=existing["id"], before=text, now=now)
+            self.conn.commit()
+            return "confirmed"
+
+        old = None
+        if replaces_id is not None:
+            old = self.conn.execute(
+                f"SELECT id, text FROM memories WHERE id = ? "
+                f"AND status IN {self.LIVE}", (replaces_id,)).fetchone()
+
+        cur = self.conn.execute(
+            "INSERT INTO memories (created, updated, category, text,"
+            " volatility, valid_from, valid_to, last_verified, status) "
+            "VALUES (?,?,?,?,?,?,NULL,?,'active')",
+            (now, now, category, text, volatility, now, now))
+        new_id = int(cur.lastrowid)
+
+        if old is not None:
+            # The successor's window opens exactly where the predecessor's
+            # closes. No gap, no overlap — that is what makes "what did I
+            # think in March" answer with one row rather than none or two.
+            self.conn.execute(
+                "UPDATE memories SET valid_to = ?, status = 'superseded', "
+                "superseded_by = ?, updated = ? WHERE id = ?",
+                (now, new_id, now, old["id"]))
+            self._repair("supersede", "arrival", "corrected by the user",
+                         old_id=old["id"], new_id=new_id,
+                         before=old["text"], after=text, now=now)
+            self.conn.commit()
+            return "replaced"
+
+        self._repair("insert", "arrival", "new fact", new_id=new_id,
+                     after=text, now=now)
+        self.conn.commit()
+        return "saved"
+
+    def list_memories(self, include_retired: bool = False) -> list[sqlite3.Row]:
+        sql = ("SELECT id, category, text, updated, volatility, status,"
+               " last_verified, valid_from, valid_to, superseded_by"
+               " FROM memories")
+        if not include_retired:
+            sql += f" WHERE status IN {self.LIVE}"
+        return self.conn.execute(sql + " ORDER BY category, id").fetchall()
 
     def count_memories(self) -> int:
         return int(self.conn.execute(
-            "SELECT COUNT(*) AS n FROM memories").fetchone()["n"])
+            f"SELECT COUNT(*) AS n FROM memories WHERE status IN {self.LIVE}"
+        ).fetchone()["n"])
 
     def find_memories(self, needle: str, limit: int = 10) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT id, category, text FROM memories WHERE text LIKE ? "
-            "ORDER BY id LIMIT ?", (f"%{needle.strip()}%", limit),
+            f"SELECT id, category, text, status FROM memories "
+            f"WHERE text LIKE ? AND status IN {self.LIVE} "
+            f"ORDER BY id LIMIT ?", (f"%{needle.strip()}%", limit),
         ).fetchall()
 
-    def delete_memory(self, mem_id: int) -> bool:
-        cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+    def memory_history(self, needle: str, limit: int = 6) -> list[sqlite3.Row]:
+        """Everything ever believed on a subject, newest first.
+
+        This is the whole point of never deleting. "What did I have the voice
+        set to before?" has an answer because the old row is still there with
+        its window closed, rather than having been overwritten.
+        """
+        return self.conn.execute(
+            "SELECT id, text, status, valid_from, valid_to, category "
+            "FROM memories WHERE text LIKE ? ORDER BY valid_from DESC LIMIT ?",
+            (f"%{needle.strip()}%", limit)).fetchall()
+
+    def expire_memory(self, mem_id: int, now: float | None = None,
+                      reason: str = "no longer true") -> bool:
+        """Close a fact's window. It stops being retrieved; it is not deleted.
+
+        This replaces the old delete_memory. "Forget that" should mean "stop
+        telling me that", not "destroy the record that it was ever so" — the
+        second makes the assistant unable to explain itself later.
+        """
+        now = now or time.time()
+        row = self.conn.execute(
+            f"SELECT id, text FROM memories WHERE id = ? AND status IN {self.LIVE}",
+            (mem_id,)).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE memories SET valid_to = ?, status = 'expired', updated = ? "
+            "WHERE id = ?", (now, now, mem_id))
+        self._repair("expire", "human", reason, old_id=mem_id,
+                     before=row["text"], now=now)
         self.conn.commit()
+        return True
+
+    def confirm_memory(self, mem_id: int, now: float | None = None) -> bool:
+        """Fresh evidence. Resets the decay clock and clears any flag."""
+        now = now or time.time()
+        cur = self.conn.execute(
+            f"UPDATE memories SET last_verified = ?, updated = ?, "
+            f"status = 'active' WHERE id = ? AND status IN {self.LIVE}",
+            (now, now, mem_id))
+        if cur.rowcount:
+            self._repair("confirm", "human", "confirmed still true",
+                         old_id=mem_id, now=now)
+            self.conn.commit()
         return cur.rowcount > 0
+
+    def flag_stale(self, ids: list[int], now: float | None = None) -> int:
+        now = now or time.time()
+        n = 0
+        for mid in ids:
+            cur = self.conn.execute(
+                "UPDATE memories SET status = 'stale' WHERE id = ? "
+                "AND status = 'active'", (mid,))
+            if cur.rowcount:
+                self._repair("flag", "aged", "past its half-life",
+                             old_id=mid, now=now)
+                n += cur.rowcount
+        self.conn.commit()
+        return n
+
+    def memory_repairs(self, limit: int = 30) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM memory_repairs ORDER BY at DESC LIMIT ?",
+            (limit,)).fetchall()
 
     # -- reminders --------------------------------------------------
 
