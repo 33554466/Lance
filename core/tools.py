@@ -46,6 +46,15 @@ MAX_LIST = 25
 MAX_READ_CHARS = 4000
 
 
+# Words that are the CATEGORY rather than a name. "Put it on the list" names
+# no list, so it belongs on the default one; a genuine new list is something a
+# person actually names, as in "start a packing list".
+_GENERIC_LIST_WORDS = frozenset({
+    "list", "lists", "board", "boards", "note", "notes",
+    "it", "that", "this", "one", "there", "here", "mine", "ours",
+})
+
+
 def slugify(title: str) -> str:
     slug = _SLUG_OK.sub("-", title.lower()).strip("-")[:MAX_TITLE_SLUG]
     return slug or "note"
@@ -106,9 +115,21 @@ class DocumentTools:
         return matches[0] if matches else None
 
     def _assert_inside(self, path: Path) -> None:
-        """The whole security model, in three lines. Called on every path."""
-        if self.root not in path.parents and path != self.root:
-            raise ValueError(f"refusing to touch {path}: outside {self.root}")
+        """The whole security model. Called on every path.
+
+        Resolves before comparing, rather than trusting the caller to have
+        done it. The callers here all do — but the guarantee then lives in
+        four separate call sites instead of in this function, and a fifth one
+        added later would look correct and not be. A symlink inside the notes
+        folder pointing anywhere else is the concrete case: unresolved, its
+        parent IS the notes folder and the check passes.
+        """
+        try:
+            real = path.resolve()
+        except OSError:
+            raise ValueError(f"refusing to touch {path}: cannot resolve it")
+        if self.root not in real.parents and real != self.root:
+            raise ValueError(f"refusing to touch {real}: outside {self.root}")
 
     # -- schemas -----------------------------------------------------
 
@@ -192,19 +213,6 @@ class DocumentTools:
 
     # -- execution ---------------------------------------------------
 
-    async def run(self, name: str, args: dict) -> str:
-        """Dispatch. Always returns a string; never raises into the caller.
-
-        A tool that raises kills a reply mid-sentence. A tool that returns
-        "I could not do that because X" lets the model tell the user
-        something useful, which is the entire point of having it.
-        """
-        try:
-            return await asyncio.to_thread(self._run_sync, name, args)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("tool %s failed", name)
-            return f"That failed: {type(exc).__name__}: {exc}"
-
     def _run_sync(self, name: str, args: dict) -> str:
         if not self.enabled:
             return "Note saving is turned off in the configuration."
@@ -217,7 +225,17 @@ class DocumentTools:
             if len(content) > self.max_chars:
                 return (f"That note is {len(content)} characters, over the "
                         f"{self.max_chars} limit. Nothing was saved.")
-            path = self._path_for(title)
+            try:
+                path = self._path_for(title)
+            except ValueError as exc:
+                # A refusal, not a bug. Happens when the resolved path would
+                # land outside the notes folder — most plausibly because
+                # something inside it is a symlink pointing elsewhere. Say it
+                # in a sentence rather than letting the toolbox read
+                # "That failed: ValueError" out loud.
+                log.warning("refused to save %r: %s", title, exc)
+                return ("I could not save that where it belongs. Something in "
+                        "the notes folder is pointing outside it.")
             header = f"{title}\n{_dt.datetime.now():%A %d %B %Y, %I:%M %p}\n\n"
             path.write_text(header + content.rstrip() + "\n", encoding="utf-8")
             log.info("wrote %s (%d chars)", path.name, len(content))
@@ -769,6 +787,29 @@ class TimerTools:
                     best, best_len = name, len(alias)
         if best:
             return best
+
+        # Nothing matched. If the stripping left nothing to go on, the only
+        # honest answer is the default list — NOT a new one.
+        #
+        # This is where "add milk to the list" used to go wrong. The filler
+        # loop above removes "the " and " list", so that phrase arrives here
+        # as an empty string, and slugify("") returns "note" — so the item
+        # landed on a board called `note` that nobody has ever opened. Same
+        # for "my list" -> "my" and "on the list" -> "on". The docstring
+        # above says an item on the wrong list is lost as surely as one never
+        # added; this guard is what makes that true rather than aspirational.
+        #
+        # A single leftover word is the same problem wearing a disguise:
+        # a real new list is something a person NAMES ("start a packing
+        # list"), and those survive stripping with something substantial
+        # left. Anything under four characters is debris.
+        # A list name is one to three words. Anything longer — before OR
+        # after stripping — is a sentence that reached here by accident, and
+        # slugifying it would create a board called "put-it-on".
+        if (len(text) < 4 or text in _GENERIC_LIST_WORDS
+                or len(text.split()) > 3
+                or len(str(raw).split()) > 4):
+            return self.default_list
         if self.allow_new_lists:
             return slugify(text)
         return self.default_list
@@ -1144,8 +1185,8 @@ from .media import MediaTools
 # sit somewhere writable and predictable — the data directory, alongside the
 # database, rather than /tmp where a reboot or a cleaner can take it.
 ROOT = Path(__file__).resolve().parent.parent
-from .clock import days_between, make_clock
-from .sweep import Sweep, age_days, score
+from .clock import make_clock
+from .sweep import Sweep
 
 
 class Toolbox:

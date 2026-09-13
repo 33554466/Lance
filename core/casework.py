@@ -142,7 +142,12 @@ class Sla:
         self.final_minutes = int(s.get("warn_final_minutes", 15))
 
     def minutes_for(self, severity: str) -> int:
-        return self.tiers.get((severity or "").lower(), self.default_minutes)
+        # str() before .lower(): severity arrives from a language model's tool
+        # arguments, and a model that decides severity is a number sends 2.
+        # AttributeError here surfaces as a spoken stack trace at the moment
+        # someone is opening a real case.
+        return self.tiers.get(str(severity or "").lower(),
+                              self.default_minutes)
 
     def due_from(self, opened: float, severity: str) -> float:
         return opened + self.minutes_for(severity) * 60
@@ -559,18 +564,23 @@ class CaseTools:
         if not steps:
             return f"The {kind} playbook has no steps in it."
 
-        severity = (args.get("severity")
-                    or spec.get("severity_default") or "standard")
+        severity = str(args.get("severity")
+                       or spec.get("severity_default") or "standard")
         now = time.time()
         due = self.sla.due_from(now, severity)
-        title = (args.get("title") or "").strip() or str(
+        title = str(args.get("title") or "").strip() or str(
             spec.get("title") or kind).strip()
 
+        # A ticket reference is text, but "INC-4412" and 4412 are both things
+        # a model will send, and db.case_open does (ref or "").strip() on it.
+        raw_ref = args.get("ref")
+        case_ref = str(raw_ref).strip() if raw_ref not in (None, "") else None
+
         case_id = self.store.case_open(kind, title, severity, due,
-                                       args.get("ref"), steps)
+                                       case_ref, steps)
         inv = sum(1 for s in steps if s["side"] == "investigation")
         adm = len(steps) - inv
-        ref = f" on {args['ref']}" if args.get("ref") else ""
+        ref = f" on {case_ref}" if case_ref else ""
         log.info("case %d opened: %s %r severity=%s due in %s",
                  case_id, kind, title, severity, human_left(due - now))
         return (f"Case open{ref}. {human_left(due - now)} on the "

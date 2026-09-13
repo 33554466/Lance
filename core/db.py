@@ -6,11 +6,14 @@ assistant can answer "what did I ask you about the insurance letter?".
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Iterable
+
+log = logging.getLogger("assistant.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -342,6 +345,33 @@ class Store:
                 "ALTER TABLE case_steps ADD COLUMN rest_seconds INTEGER")
             print("migrated: case_steps.rest_seconds added")
 
+    def _backup_file(self, why: str) -> str | None:
+        """Copy the whole database beside itself. Returns the path, or None.
+
+        Used before any migration that cannot be rolled back. Deliberately a
+        plain file copy rather than sqlite's backup API: the point is that a
+        person can fix the situation with `cp` and no tooling, at 3am, having
+        read one line of log output.
+        """
+        import shutil
+        if not self.path.exists():
+            return None
+        stamp = time.strftime("%Y-%m-%dT%H-%M-%S")
+        dest = self.path.with_name(f"{self.path.name}.{stamp}.{why}.bak")
+        try:
+            # Checkpoint first so the copy is not missing recent writes that
+            # are still sitting in the write-ahead log.
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+            except Exception:  # noqa: BLE001
+                pass
+            shutil.copy2(self.path, dest)
+            print(f"backup taken: {dest.name}")
+            return str(dest)
+        except Exception as exc:  # noqa: BLE001
+            print(f"could not back up the database ({exc})")
+            return None
+
     def _migrate_memories(self) -> None:
         """Give existing memories a validity window and a freshness clock.
 
@@ -351,10 +381,28 @@ class Store:
         thing, and a column-level constraint makes it unstorable. SQLite
         cannot drop a constraint, so the table is rebuilt.
 
-        Rebuilding a table of real household facts deserves care, so: one
-        transaction, ids preserved (the embeddings table references them),
-        row counts compared before anything is dropped, and a rollback if
-        they disagree.
+        Rebuilding a table of real household facts deserves care, so: a copy
+        of the whole database file first, ids preserved (the embeddings table
+        references them), and row counts compared before anything is dropped.
+
+        The file copy is not belt-and-braces, it is the actual safety net.
+        The obvious design — one transaction, roll back on trouble — DOES NOT
+        WORK here and silently appeared to:
+
+            conn.execute("BEGIN")
+            conn.execute("ALTER TABLE memories RENAME TO memories_v1")
+            conn.executescript(SCHEMA)     # <- implicit COMMIT, right here
+
+        `executescript` commits any open transaction before it runs. So by
+        the time the copy is attempted, the rename is already durable, and a
+        later ROLLBACK both fails ("no transaction is active") and masks the
+        real exception. The service then dies, systemd restarts it, and the
+        guard below sees `volatility` in the new empty table and concludes
+        the migration is done — stranding every fact in memories_v1 forever
+        while `/memories` reads empty and the log claims a clean rollback.
+
+        A copy of the file costs a few milliseconds and a few hundred
+        kilobytes, and it is recoverable by a human with `cp`.
         """
         cols = {r["name"] for r in
                 self.conn.execute("PRAGMA table_info(memories)").fetchall()}
@@ -365,6 +413,7 @@ class Store:
             "SELECT COUNT(*) AS n FROM memories").fetchone()["n"])
         print(f"migrating {before} memories to windowed form...")
         now = time.time()
+        backup = self._backup_file("pre-memory-migration")
         try:
             self.conn.execute("BEGIN")
             self.conn.execute("ALTER TABLE memories RENAME TO memories_v1")
@@ -396,8 +445,22 @@ class Store:
                 (now, f"migrated {after} memories to windowed form"))
             self.conn.commit()
         except Exception as exc:  # noqa: BLE001
-            self.conn.execute("ROLLBACK")
-            print(f"memory migration FAILED and was rolled back: {exc}")
+            # Undo what can still be undone, and say plainly what cannot.
+            try:
+                self.conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                pass            # executescript already committed; expected
+            print(f"\nMEMORY MIGRATION FAILED: {exc}")
+            if backup:
+                print(f"Your memories are intact in the copy taken first:\n"
+                      f"    {backup}\n"
+                      f"Restore it over {self.path} before starting again — "
+                      f"the half-migrated\ndatabase in place now will be "
+                      f"treated as already migrated on the next start.")
+            else:
+                print("No backup was taken (the copy itself failed), so "
+                      "check for a table\ncalled memories_v1 before doing "
+                      "anything else — your facts are in it.")
             raise
 
     # -- messages ---------------------------------------------------
@@ -722,16 +785,37 @@ class Store:
 
     def list_remove(self, items: list[str],
                     list_name: str = "shopping") -> list[str]:
-        removed = []
+        """Take items off a list. Exact matches first, and never more than one.
+
+        This used to be an unbounded substring DELETE over every row, which
+        made "take the milk off" also remove "almond milk" and "milk
+        chocolate", and made a mis-transcribed "a" empty the whole board.
+        Every other completion path in this file is a soft flag; this one
+        destroys the row, so it has to be the most careful, not the least.
+
+        The rule now: an exact match wins outright. Failing that, a substring
+        match counts only if exactly ONE row matches — an ambiguous removal
+        removes nothing and says so, because a person can repeat themselves
+        far more cheaply than they can reconstruct a shopping list.
+        """
+        removed: list[str] = []
         for raw in items:
-            needle = " ".join(raw.split()).strip().lower()
+            needle = " ".join(str(raw or "").split()).strip().lower()
             if not needle:
                 continue
-            for row in self.list_read(list_name):
-                if needle in row["text"].lower():
-                    self.conn.execute("DELETE FROM list_items WHERE id = ?",
-                                      (row["id"],))
-                    removed.append(row["text"])
+            rows = self.list_read(list_name)
+            exact = [r for r in rows if r["text"].strip().lower() == needle]
+            hits = exact or [r for r in rows
+                             if needle in r["text"].lower()]
+            if len(hits) != 1:
+                if len(hits) > 1:
+                    log.info("refusing to remove %r from %s — matches %d "
+                             "items (%s)", needle, list_name, len(hits),
+                             ", ".join(r["text"] for r in hits[:4]))
+                continue
+            self.conn.execute("DELETE FROM list_items WHERE id = ?",
+                              (hits[0]["id"],))
+            removed.append(hits[0]["text"])
         self.conn.commit()
         return removed
 
@@ -859,10 +943,11 @@ class Store:
         it is what makes the second "start today's workout" open the evening
         session instead of repeating the morning.
         """
-        midnight = time.time() - (time.time() % 86400)
+        from .clock import local_midnight
         row = self.conn.execute(
             "SELECT 1 FROM cases WHERE kind = 'workout' AND ref = ? "
-            "AND opened >= ? LIMIT 1", (filename, midnight)).fetchone()
+            "AND opened >= ? LIMIT 1",
+            (filename, local_midnight())).fetchone()
         return row is not None
 
     def case_note(self, case_id: int, text: str) -> None:
@@ -877,11 +962,6 @@ class Store:
         self.conn.execute(
             "UPDATE cases SET closed = ?, outcome = ? WHERE id = ?",
             (time.time(), (outcome or "").strip() or None, case_id))
-        self.conn.commit()
-
-    def case_set_sla(self, case_id: int, sla_due: float | None) -> None:
-        self.conn.execute("UPDATE cases SET sla_due = ? WHERE id = ?",
-                          (sla_due, case_id))
         self.conn.commit()
 
     def case_alert_once(self, case_id: int, marker: str) -> bool:

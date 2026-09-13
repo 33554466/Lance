@@ -20,6 +20,7 @@ import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
+from .clock import local_midnight
 from .context import ContextBuilder
 from .db import Store
 from .provider import Reply, build_provider, web_search_tool
@@ -111,6 +112,23 @@ scheduler.sweep = local_tools.sweep
 # Same reasoning for media: it needs a heartbeat to notice a video that ended
 # on its own, and to lift a duck that was never lifted. One tick, two owners.
 scheduler.media = local_tools.media
+def _detach(fn, *args) -> None:
+    """Run a blocking side-effect on a worker thread and forget about it.
+
+    For things the conversation must never wait on: ducking a video, drawing a
+    status line, reaping a child process. Failures are logged at debug and
+    dropped, because the caller has already moved on and a status light that
+    could not be drawn is not worth a word out loud.
+    """
+    async def _go() -> None:
+        try:
+            await asyncio.to_thread(fn, *args)
+        except Exception:  # noqa: BLE001
+            log.debug("detached %s failed", getattr(fn, "__name__", fn),
+                      exc_info=True)
+    asyncio.create_task(_go())
+
+
 _provider = None          # built lazily so the app starts without a key
 _busy = asyncio.Lock()
 _filler_n = 0             # rotates the "one moment" phrases
@@ -157,8 +175,16 @@ async def _backfill_loop():
     await asyncio.sleep(10)   # let the audio service settle first
     while True:
         try:
-            done = sum(local_tools.index.backfill(k, batch)
-                       for k in ("memory", "message"))
+            # On a worker thread: this is a LEFT JOIN over the whole
+            # messages table plus an ONNX forward pass over `batch` texts,
+            # and it ran on the event loop every couple of seconds. The
+            # docstring above explains that batching exists so the assistant
+            # is never deaf for a minute; doing it inline handed that minute
+            # back in slices.
+            done = 0
+            for kind in ("memory", "message"):
+                done += await asyncio.to_thread(
+                    local_tools.index.backfill, kind, batch)
         except Exception:  # noqa: BLE001
             log.exception("backfill failed — continuing")
             done = 0
@@ -248,7 +274,7 @@ async def board():
     # them.
     names = list(known) + [n for n, _ in store.list_counts()
                            if n not in known]
-    midnight = time.time() - (time.time() % 86400)
+    midnight = local_midnight()
     boards = []
     for n in names:
         rows = store.list_read(n, include_done=True)
@@ -483,14 +509,15 @@ async def ws_audio(ws: WebSocket):
                 # It comes back up when the conversation ends, which is the
                 # one state that means nobody is talking any more.
                 state = msg.get("state")
-                if state in ("listening", "transcribing"):
-                    local_tools.media.duck(True)
-                elif state == "idle":
-                    local_tools.media.duck(False)
-                # Fullscreen video hides the dashboard, and the dashboard is
-                # the only thing that says whether you have been heard. Put the
-                # same state on the video itself.
-                local_tools.media.show_state(state)
+                # Off the loop. Every one of these talks to mpv over a unix
+                # socket, and that socket does not exist for the first couple
+                # of seconds after a video starts — during which _ipc retries
+                # with time.sleep for up to three seconds. Called inline, that
+                # froze the whole orchestrator at exactly the moment someone
+                # was speaking: no websocket frames, no scheduler, no
+                # streaming. Fire and forget; a status light is never worth
+                # waiting for.
+                _detach(local_tools.media.for_state, state)
                 await hub.to_display(msg)
 
             elif kind == "cancel":
@@ -536,7 +563,7 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
         _cancel.clear()
         await hub.to_display({"type": "transcript", "text": text})
         # ...and over a video, where the dashboard cannot be seen at all.
-        local_tools.media.show_heard(text)
+        _detach(local_tools.media.show_heard, text)
         # An open case or workout means almost anything said next is aimed at
         # the checklist, and those phrases carry no keyword — "185 for 5",
         # "that's the dips". Knowing a session is open predicts it better than
@@ -546,8 +573,15 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
         log.info("routed to %s (%s): %s", route.tier, route.reason, text[:60])
         await hub.broadcast_state("thinking", route.tier)
 
-        store.add_message("user", text)
+        # Build the request BEFORE recording the turn.
+        #
+        # The other order sends the question twice: add_message writes the
+        # row, then ctx.build re-reads recent turns — picking up the row just
+        # written — and appends the same text again with its timestamp
+        # prefix. The model saw two identical user turns on every single
+        # exchange, and paid input tokens for both.
         messages = ctx.build(text)
+        store.add_message("user", text)
         reply = Reply(tier=route.tier)
 
         # Attach the web-search tool only where it is both supported and
@@ -557,7 +591,9 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
         # time is it" into an API error.
         tools = []
         ws = cfg.get("tools", {}).get("web_search", {})
-        if ws.get("enabled") and route.tier in ws.get("tiers", ["mid", "top"]):
+        searching = bool(ws.get("enabled")
+                         and route.tier in ws.get("tiers", ["mid", "top"]))
+        if searching:
             tools.append(web_search_tool(cfg))
         # Local tools go on every tier. They cost nothing per call and
         # "write that down" is exactly the kind of short request the small
@@ -597,8 +633,14 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
             timings["filler"] = time.monotonic() - t0
             await hub.to_audio({"type": "speak", "text": phrase})
 
+        # Only cover a gap that might actually be a search.
+        #
+        # The old guard was `if tools`, and `tools` is never empty because the
+        # local schemas are appended above on every request — so "One moment."
+        # covered any reply slower than the threshold, including ones that
+        # needed no lookup at all and just made her sound slow.
         filler_task = (asyncio.create_task(maybe_filler())
-                       if tools and filler_after > 0 else None)
+                       if searching and filler_after > 0 else None)
 
         try:
             stream = provider().stream_reply(

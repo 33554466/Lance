@@ -72,6 +72,23 @@ class FrozenClock:
         self._at = float(at)
 
 
+def local_midnight(now: float | None = None) -> float:
+    """The unix time of the most recent LOCAL midnight.
+
+    `time.time() - (time.time() % 86400)` looks like this and is not: the
+    modulus is taken in UTC, so in Phoenix (UTC-7) it returns 5pm yesterday.
+    The dashboard's "done today" then counts everything ticked off since
+    teatime the day before, and silently drops this morning's work after 5pm.
+
+    Uses the system's own timezone rules rather than a fixed offset, so this
+    stays correct across a DST boundary for anyone who has one.
+    """
+    import datetime as _d
+    stamp = _d.datetime.fromtimestamp(now if now is not None else time.time())
+    return stamp.replace(hour=0, minute=0, second=0,
+                         microsecond=0).timestamp()
+
+
 def days_between(later: float, earlier: float) -> float:
     """Fractional and SIGNED days.
 

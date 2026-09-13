@@ -42,7 +42,12 @@ def test_router() -> None:
     r = Router(cfg)
 
     cases = [
-        ("set a timer for ten minutes", "small"),
+        # "timer" is in router.tool_markers, so this goes to mid on purpose:
+        # a request that names something the appliance can DO should not be
+        # handed to a model choosing blind among fifty-odd tool schemas. This
+        # assertion said "small" from before tool_markers existed, and the
+        # test runner caught it the first time it ran.
+        ("set a timer for ten minutes", "mid"),
         ("what time is it", "small"),
         ("why does the moon look bigger near the horizon", "mid"),
         ("draft a note to the plumber about the leak", "mid"),
@@ -161,8 +166,14 @@ async def test_full_exchange() -> None:
               "Recycling is next week. ", "Want a reminder?"]
 
     class FakeProvider:
+        # Keep this signature in step with core.provider.stream_reply. It
+        # drifted once when tools were added, and because the fake simply
+        # raised TypeError the app fell back to "Something went wrong on my
+        # end" — so every assertion below failed at once and the smoke test
+        # stopped being able to catch anything at all.
         async def stream_reply(self, system, messages, model, max_tokens,
-                               reply: Reply) -> AsyncIterator[str]:
+                               reply: Reply, tools=None, executor=None,
+                               max_rounds: int = 4) -> AsyncIterator[str]:
             reply.model = model
             for c in CHUNKS:
                 reply.text += c

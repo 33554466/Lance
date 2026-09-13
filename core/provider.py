@@ -35,6 +35,54 @@ log = logging.getLogger("assistant.provider")
 # worrying about, but it is why the router does not hand this to every request.
 WEB_SEARCH_COST_PER_USE = 0.01
 
+
+def explain_failure(exc: Exception) -> str:
+    """One short spoken sentence naming what actually failed.
+
+    Every failure used to say "Sorry, I could not reach the network just
+    then." — a rejected API key, a rate limit, an over-length request, a
+    malformed tool schema and a genuine outage all got the same words. That
+    sentence has one property worth noting: it is the single explanation
+    guaranteed to send you to the router. A wrong key cost an hour of exactly
+    that.
+
+    These are deliberately phrased as a person would say them, because they
+    are read out loud, and each one names the place to look.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    low = text.lower()
+    status = getattr(exc, "status_code", None)
+
+    # Auth first: it is the one people misdiagnose, and it never fixes itself.
+    if status in (401, 403) or "authentication" in low \
+            or "invalid x-api-key" in low or "invalid api key" in low:
+        return ("My API key is being rejected. It needs replacing in the "
+                "environment file, not on your network.")
+    if status == 429 or "rate limit" in low or "rate_limit" in low:
+        return "I am being rate limited. Give me a minute and ask again."
+    if status == 402 or "credit" in low or "quota" in low or "billing" in low:
+        return "The account is out of credit, so I cannot answer that."
+    if status in (529,) or "overloaded" in low:
+        return "The model is overloaded right now. Try again shortly."
+    if status == 400 or "invalid_request" in low or "too long" in low \
+            or "maximum" in low and "token" in low:
+        return ("I sent a request the service would not accept. That is a "
+                "bug on my side, and the details are in the log.")
+    if status and 500 <= int(status) < 600:
+        return "The service returned an error. It is not you, and not here."
+    # Genuinely the network: connection, DNS, TLS, timeout.
+    if name in ("APIConnectionError", "APITimeoutError", "ConnectionError",
+                "TimeoutError", "ConnectTimeout", "ReadTimeout") \
+            or any(w in low for w in ("connection", "timed out", "timeout",
+                                      "dns", "name resolution", "ssl",
+                                      "unreachable")):
+        return "Sorry, I could not reach the network just then."
+    # Anything left is a bug in this appliance, and should say so rather than
+    # blaming infrastructure that is working fine.
+    return ("Something went wrong inside me answering that. The details are "
+            "in the log.")
+
 # The server tool identifier. This is versioned by date and WILL need updating
 # when Anthropic ships a newer one; an out-of-date string fails loudly rather
 # than silently, which is the good kind of breakage.
@@ -223,9 +271,10 @@ class AnthropicProvider:
             reply.cost_usd = estimate_cost(model, reply.usage)
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
             reply.error = f"{type(exc).__name__}: {exc}"
-            # Degrade, never die. The appliance says something useful and
-            # the wake-word loop keeps running.
-            yield "Sorry, I could not reach the network just then."
+            # Say what actually went wrong, and put the real exception in the
+            # journal. Degrade, never die — but degrade honestly.
+            log.exception("reply failed: %s", reply.error)
+            yield explain_failure(exc)
 
     async def _stream_once(self, kwargs: dict, convo: list,
                            reply: Reply) -> AsyncIterator[str]:
@@ -297,6 +346,9 @@ class AnthropicProvider:
                 )
                 reply._last_final = final
         finally:
+            # Deliberately empty, and deliberately left. Removing it means
+            # dedenting the sixty-line block above, which is a real chance of
+            # a real bug in exchange for two tidy lines. Not worth it.
             pass
 
 

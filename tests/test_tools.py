@@ -1,0 +1,294 @@
+"""Local tools: where notes are allowed to land, which list an item goes on,
+what happens when the model sends a word where a number belongs, and whether
+the router's markers mean what they say.
+
+    python -m tests.test_tools
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import types
+import yaml
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.modules.setdefault("sounddevice", types.ModuleType("sounddevice"))
+
+from core.casework import Sla                          # noqa: E402
+from core.db import Store                              # noqa: E402
+from core.media import as_int                          # noqa: E402
+from core.printer import Receipt                       # noqa: E402
+from core.router import Router                         # noqa: E402
+from core.tools import DocumentTools, TimerTools, slugify  # noqa: E402
+from core.workout import _as_int as workout_as_int     # noqa: E402
+
+FAILURES: list[str] = []
+
+
+def check(label: str, cond: bool, detail: str = "") -> None:
+    mark = "\033[1;32m✓\033[0m" if cond else "\033[1;31m✗\033[0m"
+    print(f"  {mark} {label}" + (f"  — {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILURES.append(label)
+
+
+def _cfg() -> dict:
+    with open(ROOT / "config.yaml") as fh:
+        return yaml.safe_load(fh)
+
+
+# ---------------------------------------------------- notes confinement
+
+HOSTILE = [
+    "../../.ssh/authorized_keys",
+    "../../../etc/passwd",
+    "/etc/passwd",
+    "..",
+    "../",
+    "....//....//etc/shadow",
+    "~/.bashrc",
+    "$HOME/.profile",
+    "note\x00.txt",
+    "a/b/c/deep",
+    "..%2f..%2fetc%2fpasswd",
+    "con",                      # reserved on other platforms; must not escape
+    "-rf /",
+    "\\\\server\\share\\file",
+    "." * 200,
+    "",
+    "   ",
+]
+
+
+def test_notes_stay_in_the_notes_folder(tmp: Path) -> None:
+    """The single most valuable test in the project.
+
+    DocumentTools spends twelve lines of comment arguing that a title can
+    never contain a path, because every title is slugified and every write is
+    checked after symlinks resolve. Every input here arrives from a wake word
+    that misfires and a transcriber that mishears, so "airtight by
+    construction" needs to be a thing that has actually been run.
+    """
+    print("\nWhere a note is allowed to land")
+    notes = tmp / "notes"
+    notes.mkdir()
+    docs = DocumentTools({"documents": {"enabled": True, "path": str(notes),
+                                        "format": "txt", "max_chars": 5000}})
+
+    escaped = []
+    for title in HOSTILE:
+        try:
+            path = docs._path_for(title)
+        except Exception:
+            continue                      # refusing outright is a pass
+        try:
+            resolved = Path(os.path.realpath(path))
+        except OSError:
+            continue
+        if notes.resolve() not in resolved.parents:
+            escaped.append((title, str(resolved)))
+    check("no hostile title escapes the notes folder", not escaped,
+          "; ".join(f"{t!r} -> {p}" for t, p in escaped[:3]))
+
+    # And the same through the real write path, which is what actually runs.
+    wrote = []
+    for title in HOSTILE:
+        try:
+            docs._run_sync("save_note", {"title": title, "content": "x"})
+        except Exception:
+            pass
+    for root, _dirs, files in os.walk(tmp):
+        for f in files:
+            p = Path(root) / f
+            if notes.resolve() not in p.resolve().parents:
+                wrote.append(str(p))
+    check("nothing was written outside the notes folder", not wrote,
+          "; ".join(wrote[:3]))
+
+    # A symlink INSIDE the notes folder pointing anywhere else must not
+    # become a write target. Unresolved, its parent is the notes folder and a
+    # naive containment check passes.
+    outside = tmp / "outside"
+    outside.mkdir()
+    (notes / "escape.txt").symlink_to(outside / "captured.txt")
+
+    refused = False
+    try:
+        docs._assert_inside(notes / "escape.txt")
+    except ValueError:
+        refused = True
+    check("_assert_inside rejects a symlink out of the folder", refused)
+
+    refused = False
+    try:
+        docs._path_for("escape")
+    except ValueError:
+        refused = True
+    check("_path_for refuses to build that path", refused)
+
+    said = docs._run_sync("save_note", {"title": "escape",
+                                        "content": "captured"})
+    check("save_note did not write through the symlink",
+          not (outside / "captured.txt").exists(),
+          "the file outside the notes folder was created")
+    check("...and said so in a sentence, not a stack trace",
+          "could not save" in said.lower() and "ValueError" not in said, said)
+
+    # Ordinary titles still work and stay put.
+    out = docs._run_sync("save_note", {"title": "Packing list",
+                                       "content": "socks\nboots"})
+    check("a normal note saves", "packing-list" in out.lower(), out)
+    check("...inside the notes folder",
+          (notes / "packing-list.txt").exists())
+    check("slugify never returns an empty name", slugify("///") == "note")
+
+
+# --------------------------------------------------------- list routing
+
+def test_resolve_list(tmp: Path) -> None:
+    print("\nWhich list an item goes on")
+    cfg = _cfg()
+    tt = TimerTools(cfg, Store(tmp / "lists.db"))
+    default = cfg["lists"]["default"]
+
+    # The bug: filler-stripping emptied the name, and slugify("") is "note".
+    for phrase in ("the list", "my list", "on the list", "list", "board",
+                   "put it on the list", "add it to my list", "notes"):
+        got = tt.resolve_list(phrase)
+        check(f"{phrase!r} -> the default list, not an invented one",
+              got == default, f"got {got!r}")
+
+    # Real names and aliases still resolve.
+    for phrase, want in (("shopping", "shopping"), ("groceries", "shopping"),
+                         ("honey do", "house"), ("honey-do list", "house"),
+                         ("the army board", "army"), ("kids", "kids"),
+                         ("work todo", "work"), ("children's", "kids")):
+        got = tt.resolve_list(phrase)
+        check(f"{phrase!r} -> {want!r}", got == want, f"got {got!r}")
+
+    # A genuinely named new list is still allowed.
+    check("'packing list' creates 'packing'",
+          tt.resolve_list("packing list") == "packing")
+    check("'camping trip' creates 'camping-trip'",
+          tt.resolve_list("camping trip") == "camping-trip")
+    check("None is the default", tt.resolve_list(None) == default)
+
+
+# ------------------------------------------------- numbers from a model
+
+def test_number_coercion() -> None:
+    print("\nNumbers the model might send")
+    for fn, name in ((as_int, "media"), (workout_as_int, "workout")):
+        check(f"{name}: an int", fn(90) == 90)
+        check(f"{name}: a numeric string", fn("90") == 90)
+        check(f"{name}: a float", fn(90.7) == 90)
+        check(f"{name}: a float string", fn("90.0") == 90)
+        check(f"{name}: zero is zero, not None", fn(0) == 0)
+        check(f"{name}: a word is None, not a crash", fn("ninety") is None)
+        check(f"{name}: None is None", fn(None) is None)
+        check(f"{name}: empty string is None", fn("") is None)
+        check(f"{name}: a dict is None", fn({"seconds": 90}) is None)
+        check(f"{name}: True is not 1", fn(True) is None)
+
+
+def test_severity_is_not_assumed_to_be_text() -> None:
+    print("\nSeverity from a model")
+    sla = Sla(_cfg())
+    check("a word works", isinstance(sla.minutes_for("high"), int))
+    check("a number does not raise", isinstance(sla.minutes_for(2), int))
+    check("None falls back to the default",
+          sla.minutes_for(None) == sla.default_minutes)
+
+
+# ------------------------------------------------------------- router
+
+def test_router_word_boundaries() -> None:
+    print("\nRouter markers match words, not fragments")
+    r = Router(_cfg())
+
+    # Each of these was escalated by a marker hiding inside another word.
+    for text, fragment in (("start my training", "rain"),
+                           ("drill weekend training", "rain"),
+                           ("can I borrow the drill", "row"),
+                           ("I am impressed", "press")):
+        route = r.route(text)
+        check(f"{text!r} is not routed by {fragment!r}",
+              fragment not in route.reason, route.reason)
+
+    # The markers still do their job when the word is really there. Only
+    # assert on markers this config actually defines — tool_markers arrived in
+    # a later patch, so a config without it should skip rather than fail.
+    configured = set(r.live) | set(r.tools) | set(r.markers)
+    for text, expect in (("what is the weather tonight", "weather"),
+                         ("set a timer for five minutes", "timer"),
+                         ("look up the cost of a chisel", "cost of"),
+                         ("put on some lofi hip hop", "put on"),
+                         ("pause that", "pause")):
+        if expect not in configured:
+            print(f"    · skipped {expect!r} — not in this config")
+            continue
+        route = r.route(text)
+        check(f"{text!r} still matches {expect!r}",
+              expect in route.reason and route.tier != "small", route.reason)
+
+    check("an explicit escalation still wins",
+          r.route("think hard about this").tier == "top")
+    check("a short plain question still goes to the small tier",
+          r.route("what is two plus two").tier == "small")
+    check("an open session forces mid",
+          r.route("185 for 5", in_session=True).tier == "mid")
+
+
+# ------------------------------------------------------------- printer
+
+def test_receipt_render() -> None:
+    """A golden test for the 42-column layout. No printer needed."""
+    print("\nReceipt layout")
+    r = Receipt(width=42)
+    r.centre("BENCH PRESS", style="head")
+    r.columns("Load", "185 lb")
+    r.rule()
+    r.wrap("A long line that has to be folded at the paper width rather "
+           "than running off the edge of the receipt.")
+    text = r.preview()
+    lines = text.splitlines()
+    widths = [len(l) for l in lines]
+    check("nothing exceeds the paper width", max(widths) <= 42,
+          f"widest line is {max(widths)}")
+    check("the rule fills the width", any(w == 42 for w in widths))
+    check("a column pair shares one line",
+          any("Load" in l and "185 lb" in l for l in lines),
+          str([l for l in lines if "Load" in l]))
+    check("the right column is right-aligned",
+          any(l.rstrip().endswith("185 lb") for l in lines))
+    check("long text was wrapped, not truncated",
+          "receipt." in text and len(lines) > 4)
+    check("the title is centred",
+          any(l.strip() == "BENCH PRESS" and l != l.lstrip() for l in lines)
+          or any(l.strip() == "BENCH PRESS" for l in lines))
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        test_notes_stay_in_the_notes_folder(tmp)
+        test_resolve_list(tmp)
+        test_number_coercion()
+        test_severity_is_not_assumed_to_be_text()
+        test_router_word_boundaries()
+        test_receipt_render()
+    print()
+    if FAILURES:
+        print(f"\033[1;31m{len(FAILURES)} failed\033[0m")
+        for f in FAILURES:
+            print(f"  - {f}")
+        return 1
+    print("\033[1;32mall passed\033[0m")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

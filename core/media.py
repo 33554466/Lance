@@ -122,6 +122,22 @@ class Hit:
         return " ".join(bits)
 
 
+def as_int(value) -> int | None:
+    """A number from whatever the model actually sent, or None.
+
+    Tool arguments come from a language model, so "30", 30, 30.0 and "thirty"
+    all arrive. A bare int() on the last one raises, and tool failures are
+    read out loud — the user hears "That failed: ValueError: invalid literal
+    for int() with base 10: 'thirty'". None lets the caller answer in English.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def clean_query(raw: str) -> str:
     """Strip the asking off the front of what was asked for.
 
@@ -657,6 +673,21 @@ class MediaTools:
         if self.enabled:
             self.player.duck(on)
 
+    def for_state(self, state: str) -> None:
+        """Everything the player should do about an assistant state change.
+
+        One call because it runs on a worker thread and each hop costs a
+        thread; also because ducking and drawing must not disagree about what
+        the state is.
+        """
+        if not self.enabled:
+            return
+        if state in ("listening", "transcribing"):
+            self.duck(True)
+        elif state == "idle":
+            self.duck(False)
+        self.show_state(state)
+
     def show_state(self, state: str) -> None:
         """Mirror the assistant's state onto the video.
 
@@ -832,7 +863,9 @@ class MediaTools:
             return "Back to the start." if p.restart() \
                 else "I could not seek it."
         if action in ("forward", "back"):
-            step = int(args.get("seconds") or p.seek_seconds)
+            step = as_int(args.get("seconds"))
+            if step is None:
+                step = p.seek_seconds
             delta = step if action == "forward" else -step
             if not p.seek(delta):
                 return "I could not seek it."
@@ -844,10 +877,10 @@ class MediaTools:
                 return "I could not change the volume."
             return f"Volume {p.volume}."
         if action == "volume":
-            level = args.get("level")
+            level = as_int(args.get("level"))
             if level is None:
                 return "What level?"
-            if not p.set_volume(int(level)):
+            if not p.set_volume(level):
                 return "I could not change the volume."
             return f"Volume {p.volume}."
         return f"I do not know how to {action}."

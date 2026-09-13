@@ -43,6 +43,23 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # "| rest 180", "| rest 180s", "| 180s", "| 180". The pipe is the marker: it
 # never occurs in an exercise name, so nothing is stripped by accident.
+def _as_int(value) -> int | None:
+    """A number from whatever the model actually sent, or None.
+
+    Tool arguments are written by a language model, so "90", 90, 90.0 and
+    "ninety" all turn up. A bare int() on the last one raises, and because
+    tool failures are spoken aloud the user hears
+    "That failed: ValueError: invalid literal for int()". Returning None lets
+    the caller say something a person would say instead.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 _REST = re.compile(r"\|\s*(?:rest\s*)?(\d+)\s*s?\s*$", re.I)
 
 MAX_SPOKEN = 3
@@ -507,17 +524,28 @@ class WorkoutTools:
             # then to the configured default.
             step = next((r for r in reversed(rows) if r["done"]), None)
         if step is None:
-            if secs:
-                self.store.add_reminder(time.time() + int(secs),
+            asked = _as_int(secs)
+            if asked and asked > 0:
+                self.store.add_reminder(time.time() + asked,
                                         "rest is up", kind="timer")
-                return f"{int(secs)} seconds."
+                return f"{asked} seconds."
             return "Log a set first and I will know how long to rest."
-        if secs:
-            seconds = int(secs)
+        if secs is not None:
+            seconds = _as_int(secs)
+            if seconds is None:
+                return "I did not catch how long."
         else:
             seconds = self.store.case_step_rest(step["id"])
-            if seconds is None or seconds <= 0:
+            # `is None` and not a truth test. Zero means the file says "no
+            # rest on this step" — a warm-up drill, a stretch — and it is a
+            # real answer, not a missing one. db.case_step_rest goes out of
+            # its way to preserve that distinction; treating 0 as unset here
+            # threw it away and started a 90-second countdown on exactly the
+            # steps marked as needing none.
+            if seconds is None:
                 seconds = self.default_rest
+        if seconds <= 0:
+            return f"No rest on {step['label']}."
         return self._rest_for(step, seconds)
 
     def _next(self, case) -> str:
