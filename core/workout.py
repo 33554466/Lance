@@ -445,6 +445,30 @@ class WorkoutTools:
         # The source filename goes in `ref`, which a workout has no other use
         # for. It is what lets a double day know the morning session is
         # already done.
+        # One session at a time. Starting a workout closes any workout still
+        # open — nothing else.
+        #
+        # Without this they pile up, and the pile is invisible: `case_active`
+        # returns the newest, so the appliance behaves as though a session is
+        # permanently running. The router then forces every single utterance
+        # to the mid tier ("a session is open") because mid-workout, "185 for
+        # 5" is a tool call with no keyword in it. Ten abandoned sessions from
+        # an afternoon of testing is enough to make that permanent, and the
+        # only symptom is a routing reason nobody reads.
+        #
+        # A real case is deliberately left alone. A phishing investigation and
+        # a training session are different things, and finishing your squats
+        # must never close an open investigation.
+        for row in self.store.cases_open():
+            if row["kind"] != "workout":
+                continue
+            prog = self.store.case_progress(row["id"])
+            logged = sum(d for d, _ in prog.values())
+            self.store.case_close(
+                row["id"], "superseded" if logged else "never started")
+            log.info("closed workout %d (%s) — %s", row["id"], row["title"],
+                     f"{logged} logged" if logged else "nothing logged")
+
         case_id = self.store.case_open("workout", title, "session", None,
                                        path.name, steps)
         self.store.case_steps_set_rest(

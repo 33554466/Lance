@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import sys
+import types
 import tempfile
 import time
 from pathlib import Path
@@ -225,6 +226,61 @@ def test_migration_failure_keeps_a_copy(tmp: Path) -> None:
         check("...with all three facts in it", n == 3, f"{n} rows")
 
 
+def test_only_one_workout_open(tmp: Path) -> None:
+    """Starting a workout closes the last one, and leaves real cases alone.
+
+    Ten abandoned sessions accumulated on the real appliance in an afternoon
+    of testing. Nothing showed it: case_active returns the newest, so the
+    router reported "a session is open" for every utterance and quietly
+    forced the mid tier forever.
+    """
+    print("\nOne session at a time")
+    sys.modules.setdefault("sounddevice", types.ModuleType("sounddevice"))
+    import yaml
+    from core.workout import WorkoutTools
+
+    wdir = tmp / "workouts"
+    wdir.mkdir()
+    for name, body in (("push.txt", "# Push Day\n## Main\nBench, 5 x 5 | rest 180\n"),
+                       ("pull.txt", "# Pull Day\n## Main\nRows, 5 x 5 | rest 180\n")):
+        (wdir / name).write_text(body)
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    cfg.setdefault("workouts", {})
+    cfg["workouts"].update({"enabled": True, "path": str(wdir)})
+    st = _store(tmp, "sessions.db")
+    wt = WorkoutTools(cfg, st, cases=None)
+
+    # A real investigation, open and minding its own business.
+    case = st.case_open("phishing", "Suspicious invoice", "high",
+                        time.time() + 3600, "INC-1",
+                        [{"side": "investigation", "phase": "Triage",
+                          "key": "headers", "text": "Read the headers",
+                          "aliases": []}])
+
+    wt.run_sync("start_workout", {"name": "push"})
+    wt.run_sync("start_workout", {"name": "pull"})
+    wt.run_sync("start_workout", {"name": "push"})
+
+    workouts = [c for c in st.cases_open() if c["kind"] == "workout"]
+    check("only one workout is open", len(workouts) == 1,
+          f"{len(workouts)} open")
+    check("...and it is the most recent one",
+          workouts and workouts[0]["title"] == "Push Day",
+          workouts[0]["title"] if workouts else "none")
+
+    cases = [c for c in st.cases_open() if c["kind"] != "workout"]
+    check("the investigation is untouched",
+          len(cases) == 1 and cases[0]["id"] == case, str(cases))
+
+    closed = st.conn.execute(
+        "SELECT outcome FROM cases WHERE kind='workout' AND closed IS NOT NULL"
+    ).fetchall()
+    check("the abandoned ones say why they closed",
+          all(r["outcome"] == "never started" for r in closed),
+          str([r["outcome"] for r in closed]))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -233,6 +289,7 @@ def main() -> int:
         test_workout_ran_today(tmp)
         test_migration(tmp)
         test_migration_failure_keeps_a_copy(tmp)
+        test_only_one_workout_open(tmp)
     print()
     if FAILURES:
         print(f"\033[1;31m{len(FAILURES)} failed\033[0m")
