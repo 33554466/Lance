@@ -1138,6 +1138,12 @@ from .casework import CaseTools
 from .printer import PrinterTools
 from .embed import Embedder, SemanticIndex
 from .workout import WorkoutTools
+from .media import MediaTools
+
+# Where the appliance lives on disk. Used for the mpv IPC socket, which has to
+# sit somewhere writable and predictable — the data directory, alongside the
+# database, rather than /tmp where a reboot or a cleaner can take it.
+ROOT = Path(__file__).resolve().parent.parent
 from .clock import days_between, make_clock
 from .sweep import Sweep, age_days, score
 
@@ -1168,12 +1174,16 @@ class Toolbox:
         # Workouts borrow the case matcher: the same loose spoken-name
         # matching that ticks off 'I purged it' ticks off 'bench done'.
         self.workouts = WorkoutTools(cfg, store, cases=self.cases)
+        # Media owns a child process, which nothing else here does. It needs
+        # ROOT for the default IPC socket path, and app.py hands it the
+        # scheduler tick so a finished video stops being "playing".
+        self.media = MediaTools(cfg, ROOT)
 
     def schemas(self) -> list[dict]:
         return (self.docs.schemas() + self.mem.schemas()
                 + self.timers.schemas() + self.desktop.schemas()
                 + self.cases.schemas() + self.printer.schemas()
-                + self.workouts.schemas())
+                + self.workouts.schemas() + self.media.schemas())
 
     def memory_block(self) -> str:
         return self.mem.block()
@@ -1187,7 +1197,8 @@ class Toolbox:
             return f"That failed: {type(exc).__name__}: {exc}"
 
     def _run_sync(self, name: str, args: dict) -> str:
-        for handler in (self.workouts.run_sync, self.printer.run_sync,
+        for handler in (self.media.run_sync,
+                        self.workouts.run_sync, self.printer.run_sync,
                         self.cases.run_sync,
                         self.desktop.run_sync, self.timers.run_sync,
                         self.mem.run_sync):

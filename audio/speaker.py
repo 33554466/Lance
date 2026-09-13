@@ -150,6 +150,19 @@ class Speaker:
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
 
+    @property
+    def is_busy(self) -> bool:
+        """Playing OR still holding sentences to play.
+
+        `is_speaking` on its own is not enough to decide "has it finished".
+        Between two sentences it goes briefly false while the next one is
+        still sitting in the queue, and anything that reopens the microphone
+        in that gap makes the assistant transcribe its own next sentence.
+        This is the condition wait_until_idle has always used; it just did not
+        have a name.
+        """
+        return self._speaking.is_set() or not self._queue.empty()
+
     def wait_until_idle(self, timeout: float = 90.0) -> bool:
         """Block until nothing is queued and nothing is playing.
 

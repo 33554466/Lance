@@ -299,7 +299,7 @@ location:
   # hours resolve correctly. It is a hint for the search engine, not
   # tracking, and it never leaves the request. Set this to where the
   # appliance actually lives.
-  city: ""
+  city: "Gilbert"
   region: "Arizona"
   country: "US"
   timezone: "America/Phoenix"
@@ -360,6 +360,24 @@ router:
   # Sonnet instead of Haiku on these costs a fraction of a cent and buys the
   # right tool being called.
   tool_markers:
+    - "play"
+    - "put on"
+    - "pull up"
+    - "video"
+    - "youtube"
+    - "pause"
+    - "resume"
+    - "volume"
+    - "mute"
+    - "louder"
+    - "quieter"
+    - "skip"
+    - "turn it up"
+    - "turn it down"
+    - "turn up"
+    - "turn down"
+    - "not that one"
+    - "next one"
     - "workout"
     - "exercise"
     - "session"
@@ -585,6 +603,33 @@ context:
     Keep replies to a few words while he is training. He has a bar in his
     hands.
 
+    You can play things from YouTube. Use play_media whenever {user} asks to
+    play, put on, pull up, show, or find a video, a song, a clip or a channel.
+
+    Pass what they want to WATCH, not what they said. "Pull up a video on how
+    to sharpen a chisel" is the query "how to sharpen a chisel". Do not add
+    words they did not say, and do not add the year unless they gave one.
+
+    Set audio_only when the picture does not matter — music, a podcast, a
+    radio mix, an album — or when they say "put on" rather than "show me".
+    That leaves the dashboard on screen and uses far less of the machine.
+
+    Say what started, in one short sentence, and stop. The title is already
+    on the screen and you are talking over the first seconds of it. If they
+    say it is the wrong one, call media_control with 'next' — that plays the
+    next search result without searching again, so do not search again.
+
+    Use media_control for pause, resume, stop, restart, forward, back,
+    louder, quieter and volume. Work out the seconds yourself: "back a
+    minute" is 60. Never announce the new volume as a number unless they
+    asked what it was.
+
+    Use media_status when they ask what this is, what is playing, or how much
+    is left.
+
+    You cannot queue things up, make playlists, or resume something from
+    yesterday, and you should say so plainly rather than pretending.
+
     If you do not know something and cannot look it up, say so in one short
     sentence rather than guessing. If a request is ambiguous, ask one
     clarifying question.
@@ -686,6 +731,40 @@ wake_word:
   # Ignore further detections for this long after one fires.
   refractory_seconds: 2.0
 
+  # How many 80 ms frames in a row must clear the threshold before this
+  # counts as a wake.
+  #
+  # This is a better first lever than the threshold, and you should reach for
+  # it first. The model already integrates over roughly a second and a half,
+  # so when you genuinely say the wake word the score STAYS up for several
+  # frames. A dropped pan, a chair on tile, a syllable off the television or
+  # a word that happens to rhyme spikes for one frame and falls away.
+  #
+  # Raising the threshold costs you real wakes from the far side of the room,
+  # where the score is honestly lower. Requiring the score to persist costs
+  # you almost nothing, because when you mean it, it does persist.
+  #
+  # 2 is a large improvement over 1. 3 starts to feel sluggish.
+  confirm_frames: 2
+
+  # Ignore any detection made on audio that is not speech at all.
+  #
+  # openWakeWord will run Silero VAD alongside the wake model and zero out
+  # predictions from non-speech audio. That removes the entire family of
+  # false wakes that come from NOISE rather than from words — which, in a
+  # kitchen, is most of them. Costs about a megabyte of model and a
+  # negligible amount of CPU. Set to 0 to switch it off.
+  vad_threshold: 0.5
+
+  # After the chime, how long to wait for you to actually start talking.
+  #
+  # Without this a false trigger opens the microphone for the full utterance
+  # limit — twenty seconds of the screen saying "listening" with nobody
+  # there. That is what turns an occasional spurious wake into something that
+  # feels constant. Five seconds is plenty: you say the wake word and then
+  # you speak. Set to 0 to wait the full utterance limit as before.
+  speech_timeout_seconds: 5
+
 vad:
   # Trailing silence before we decide you have stopped talking. Too low
   # and it cuts you off mid-sentence; too high and the device feels dead.
@@ -750,10 +829,16 @@ behaviour:
   # network, so it works instantly, and it works even when the API is slow
   # or down — which is exactly when you most want to be able to shut it up.
   #
-  # Matching is EXACT after lowercasing and stripping punctuation. That is
-  # deliberate: substring matching would end the conversation when you said
-  # "stop by the store on the way home". If you want a phrase to work, put
-  # the whole phrase here.
+  # Matching is exact at the CORE, after lowercasing, stripping punctuation,
+  # and trimming padding words off both ends. So "okay Lance, go to sleep now
+  # please" matches the entry "go to sleep", and "stop by the store on the way
+  # home" still does not match anything, because its core is not a dismissal.
+  #
+  # That middle ground is deliberate. Substring matching would end the
+  # conversation every time you mentioned a shop. Whole-string matching meant
+  # it only worked when you happened to say the bare phrase and nothing else,
+  # which is not how anyone talks — and a dismissal that works half the time
+  # is worse than none, because you keep trying it.
   stop_phrases:
     - "stop"
     - "cancel"
@@ -775,6 +860,71 @@ behaviour:
     - "no thanks"
     - "thank you thats all"
     - "thank you that's all"
+    - "stop it"
+    - "stop talking"
+    - "stop listening"
+    - "be quiet"
+    - "shut up"
+    - "hush"
+    - "enough"
+    - "thats enough"
+    - "that's enough"
+    - "that is enough"
+    - "thats it"
+    - "that's it"
+    - "sleep"
+    - "go sleep"
+    - "back to sleep"
+    - "goodnight"
+    - "good night"
+    - "night night"
+    - "all done"
+    - "im good"
+    - "i'm good"
+    - "were good"
+    - "we're good"
+    - "no more"
+    - "leave it"
+    - "drop it"
+    - "dismissed"
+    - "stand down"
+    - "thatll be all"
+    - "that'll be all"
+    - "that will be all"
+  # Words with no meaning at the edges of a dismissal. These are trimmed off
+  # both ENDS before matching, and only ever to reveal a phrase that is on the
+  # list above in full — so this widens what you can say without widening what
+  # counts. The assistant's own name is added automatically.
+  stop_fillers:
+    - "okay"
+    - "alright"
+    - "yeah"
+    - "please"
+    - "thanks"
+    - "now"
+    - "mate"
+    - "buddy"
+  # Listen for a dismissal WHILE a reply is playing.
+  #
+  # Without this, the microphone is effectively off for the whole length of a
+  # reply: "go to sleep" works in the follow-up window afterwards and does
+  # nothing at all mid-sentence. Same words, same room, different result — the
+  # thing that reads as unreliable rather than as a missing feature.
+  #
+  # It listens underneath the assistant's own voice rather than stopping
+  # playback to check, and only cuts off when a dismissal has actually been
+  # transcribed. Worst case that is about a second of extra talking; in
+  # exchange it never cuts you off for a cough, which is the failure people
+  # cannot forgive.
+  #
+  # This depends entirely on the microphone array's hardware echo
+  # cancellation. It is correct on the ReSpeaker with the speaker wired
+  # through the array; switch it off if you ever move audio to the mini PC's
+  # own jack.
+  dismiss_while_speaking: true
+  # Longest interruption to consider. Dismissals are short; anything longer
+  # is you talking to somebody else in the room.
+  dismiss_max_seconds: 2.5
   # Play a rising three-tone when a timer or reminder fires. Longer and more
   # insistent than the wake chime, because it has to cut through a running
   # tap and a conversation — but deliberately not an alarm clock.
@@ -825,6 +975,71 @@ behaviour:
     - "One moment."
     - "Checking now."
     - "Give me a second."
+
+media:
+  # Play things from YouTube, out loud or on the screen.
+  #
+  # No browser. mpv plus yt-dlp gives you the video with no ads, no cookie
+  # wall and no consent banner, starting at the first frame — and an IPC
+  # socket, which is what turns "pause", "back thirty seconds" and "turn it
+  # down" into things you can say instead of things you have to click.
+  #
+  #   sudo apt install -y mpv yt-dlp
+  #   python3 scripts/media_probe.py
+  #
+  # Nothing is downloaded. Everything is streamed and nothing is written to
+  # disk except the control socket below.
+  enabled: true
+
+  # THE SETTING PEOPLE GET WRONG. mpv must play through the microphone array,
+  # exactly like the assistant's own voice does.
+  #
+  # The XVF3800 cancels echo by comparing what the mics hear against a
+  # reference of what IT is playing. Send video audio anywhere else — HDMI,
+  # the mini PC's own jack — and the chip never sees it, so the wake word
+  # stops working the moment anything is playing. Which is precisely when you
+  # want to say "pause".
+  #
+  # 'auto' follows the system default, which is NOT the array. Run
+  #   python3 scripts/media_probe.py --devices
+  # and paste the array's name in here.
+  audio_device: "pipewire/alsa_output.usb-Seeed_Studio_reSpeaker_XVF3800_4-Mic_Array_114993701262100395-00.analog-stereo"
+
+  # Starting volume, 0-100, and how far "louder" and "quieter" move it.
+  volume: 85
+  volume_step: 15
+  # What the volume drops to while the assistant is listening or talking.
+  # It stays ducked for the WHOLE exchange, including follow-ups, and comes
+  # back up when the conversation ends — lifting it between sentences means
+  # the video jumps to full while you are still mid-question.
+  duck_volume: 25
+  # Safety net. If a duck is never lifted — a dropped message, a crash
+  # mid-reply — restore the volume anyway after this long. Without it, one
+  # lost message leaves everything you play afterwards at a murmur and
+  # nothing in the log says why.
+  duck_timeout_seconds: 180
+
+  # How far "skip forward" and "go back" move when no length is given.
+  seek_seconds: 30
+  # Cap the resolution. 1080p decodes comfortably on the SER8; asking for
+  # 4K on a 1080p screen costs CPU and buys nothing.
+  max_height: 1080
+
+  # How many search results to keep, so "not that one" can move down the list
+  # without searching again. Five is plenty — past the third result you are
+  # better off rewording the request.
+  results: 5
+  search_timeout_seconds: 20
+
+  # Where mpv listens for commands. Anywhere writable; the data directory
+  # keeps it alongside the database rather than in /tmp, where a cleaner or
+  # a reboot can take it.
+  ipc_socket: "data/mpv.sock"
+  # X display for fullscreen video. Same one the dashboard is on.
+  display: ":0"
+
+  mpv_bin: "mpv"
+  ytdlp_bin: "/home/lance/assistant/.venv/bin/yt-dlp"
 
 storage:
   db_path: "data/assistant.db"

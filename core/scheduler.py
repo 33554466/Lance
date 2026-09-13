@@ -86,6 +86,7 @@ class Scheduler:
         self.cases_on = bool((cfg.get("casework", {}) or {}).get("enabled", False))
         self.sla = Sla(cfg)
         self.sweep = None      # set by app.py, which owns the toolbox
+        self.media = None      # likewise — needs a heartbeat, not a thread
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -112,6 +113,24 @@ class Scheduler:
         if self.cases_on:
             await self._sla_tick()
         self._sweep_tick()
+        self._media_tick()
+
+    def _media_tick(self) -> None:
+        """Notice a video that ended, and rescue a volume that never came back.
+
+        Both are cheap — a poll() on a child process and a subtraction — and
+        both matter for the same reason: the failure is silent. Without the
+        first, "what's playing?" names something that finished an hour ago.
+        Without the second, one dropped state message leaves everything you
+        play afterwards at a murmur, with nothing in the logs to explain it.
+        """
+        media = getattr(self, "media", None)
+        if media is None:
+            return
+        try:
+            media.tick()
+        except Exception:  # noqa: BLE001
+            log.exception("media tick failed — continuing")
 
     def _sweep_tick(self) -> None:
         """Look for memories that have quietly gone stale.

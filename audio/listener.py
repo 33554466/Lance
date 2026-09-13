@@ -34,6 +34,27 @@ class Listener:
         self.refractory = w["refractory_seconds"]
         self.wake_name = w["model"]
 
+        # How many 80 ms frames in a row must clear the threshold before we
+        # believe it. The model already integrates over roughly a second and a
+        # half, so a genuine wake word holds its score for several frames
+        # while a clatter, a consonant off the television, or a syllable that
+        # happens to rhyme spikes for one and falls away.
+        #
+        # This is a much better lever than the threshold alone: raising the
+        # threshold costs you real wakes from across the room, where the score
+        # is honestly lower. Requiring the score to PERSIST costs almost
+        # nothing, because when you actually say it, it does.
+        self.confirm_frames = max(1, int(w.get("confirm_frames", 1)))
+
+        # Hand openWakeWord its own Silero gate. With this set it zeroes any
+        # prediction made on audio that is not speech at all, which removes
+        # the whole family of false wakes that come from noise rather than
+        # from words — a dropped pan, a chair, the extractor fan.
+        self.wake_vad = float(w.get("vad_threshold", 0.0) or 0.0)
+
+        self._above = 0          # consecutive frames over the threshold
+        self._peak = 0.0         # best score seen during those frames
+
         v = cfg["vad"]
         self.silence_frames = int(v["silence_ms"] / (VAD_FRAME / self.sr * 1000))
         self.max_frames = int(v["max_utterance_seconds"] * self.sr / VAD_FRAME)
@@ -43,6 +64,10 @@ class Listener:
 
         self._audio_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
         self._vad_buf = np.zeros(0, dtype=np.float32)
+        self._snip_buf = np.zeros(0, dtype=np.float32)
+        self._snip_audio: list[np.ndarray] = []
+        self._snip_speech = 0
+        self._snip_silence = 0
         self._last_wake = 0.0
         # Updated on every audio callback. The service watches this to
         # notice a microphone that has stopped delivering audio — muted
@@ -75,6 +100,7 @@ class Listener:
                     f"and drop the .onnx file there."
                 )
             self.oww = OWWModel(wakeword_models=[str(path)],
+                                vad_threshold=self.wake_vad,
                                 inference_framework="onnx")
             # openWakeWord keys its scores by the model's filename stem, not
             # by whatever you called it in config.
@@ -84,6 +110,7 @@ class Listener:
         else:
             download_models(model_names=[self.wake_name])
             self.oww = OWWModel(wakeword_models=[self.wake_name],
+                                vad_threshold=self.wake_vad,
                                 inference_framework="onnx")
             self.wake_key = self.wake_name
 
@@ -144,11 +171,94 @@ class Listener:
     def drain(self) -> None:
         """Throw away buffered audio. Called after speaking so the assistant
         does not transcribe the tail of its own reply."""
+        self._snip_buf = np.zeros(0, dtype=np.float32)
+        self._reset_snippet()
         while True:
             try:
                 self._audio_q.get_nowait()
             except queue.Empty:
                 return
+
+    def _reset_snippet(self) -> None:
+        self._snip_audio = []
+        self._snip_speech = 0
+        self._snip_silence = 0
+
+    def snippet(self, max_seconds: float = 2.5, silence_ms: float = 350,
+                min_speech_ms: float = 250) -> np.ndarray:
+        """Return one short island of speech, or nothing, without waiting.
+
+        This exists so the assistant can be told to shut up WHILE it is
+        talking. The obvious implementation — stop playback, listen, decide —
+        is unacceptable: it cuts him off every time a chair scrapes. So
+        instead we listen underneath our own voice and only stop when a
+        dismissal has actually been transcribed. Worst case that is about a
+        second of extra talking; the trade is that it never cuts off for
+        nothing, which is the failure mode people cannot forgive.
+
+        It is safe to call in a tight loop. Speech state carries across calls,
+        so an utterance spanning several calls is assembled properly, and a
+        call that finds only silence costs one VAD pass over whatever has
+        arrived and returns an empty array.
+
+        Depends entirely on the microphone array's hardware echo
+        cancellation, which is why the reference signal has to come back
+        through the array's own USB playback endpoint. Everything about this
+        function is wrong on a speaker wired to the mini PC's jack.
+        """
+        sil_frames = max(1, int(silence_ms / (VAD_FRAME / self.sr * 1000)))
+        min_frames = max(1, int(min_speech_ms / (VAD_FRAME / self.sr * 1000)))
+        max_frames = max(1, int(max_seconds * self.sr / VAD_FRAME))
+
+        # One short blocking read paces the caller's loop; everything else
+        # already queued is taken without waiting, so we never fall behind.
+        try:
+            blocks = [self._audio_q.get(timeout=0.2)]
+        except queue.Empty:
+            return np.zeros(0, dtype=np.float32)
+        while True:
+            try:
+                blocks.append(self._audio_q.get_nowait())
+            except queue.Empty:
+                break
+        self._snip_buf = np.concatenate([self._snip_buf, *blocks])
+
+        while len(self._snip_buf) >= VAD_FRAME:
+            chunk = self._snip_buf[:VAD_FRAME]
+            self._snip_buf = self._snip_buf[VAD_FRAME:]
+
+            pcm = (np.clip(chunk, -1.0, 1.0) * 32767).astype(np.int16)
+            speech = float(self.vad.predict(pcm)) >= 0.5
+
+            if speech:
+                self._snip_audio.append(chunk)
+                self._snip_speech += 1
+                self._snip_silence = 0
+            elif self._snip_audio:
+                # Keep trailing silence in the clip. Whisper transcribes a
+                # word with a little room after it far better than one that
+                # ends the instant the speaker does.
+                self._snip_audio.append(chunk)
+                self._snip_silence += 1
+            else:
+                continue
+
+            done = (self._snip_silence >= sil_frames
+                    or len(self._snip_audio) >= max_frames)
+            if not done:
+                continue
+
+            clip = (np.concatenate(self._snip_audio) if self._snip_audio
+                    else np.zeros(0, dtype=np.float32))
+            heard = self._snip_speech
+            self._reset_snippet()
+            # Too short to be a phrase — a cough, a door, one syllable of
+            # our own voice getting past the canceller.
+            if heard >= min_frames:
+                return clip
+            return np.zeros(0, dtype=np.float32)
+
+        return np.zeros(0, dtype=np.float32)
 
     # -- wake word ---------------------------------------------------
 
@@ -165,7 +275,21 @@ class Listener:
         score = float(scores.get(self.wake_key, 0.0))
 
         if score < self.threshold:
+            # One frame under the line ends the run. A wake word that is
+            # really being said does not flicker.
+            if self._above:
+                log.debug("wake candidate lapsed after %d frame(s), peak %.3f",
+                          self._above, self._peak)
+            self._above = 0
+            self._peak = 0.0
             return None
+
+        self._above += 1
+        self._peak = max(self._peak, score)
+        if self._above < self.confirm_frames:
+            return None
+
+        peak, self._above, self._peak = self._peak, 0, 0.0
 
         now = time.time()
         if now - self._last_wake < self.refractory:
@@ -175,8 +299,9 @@ class Listener:
         # Reset internal state so the next detection starts clean, otherwise
         # the model can re-fire on the decaying tail of this one.
         self.oww.reset()
-        log.info("wake word fired, score=%.3f", score)
-        return score
+        log.info("wake word fired, score=%.3f (held %d frames)",
+                 peak, self.confirm_frames)
+        return peak
 
     # -- capture -----------------------------------------------------
 

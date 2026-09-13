@@ -50,6 +50,11 @@ SHOWS_CASE = frozenset({
 })
 SHOWS_NOTHING = frozenset({"close_case", "finish_workout"})
 
+# Playing a video takes the whole screen for itself. Redrawing the checklist
+# underneath it would be invisible now and wrong later, when mpv quits and the
+# dashboard comes back showing a case nobody is working on.
+TAKES_SCREEN = frozenset({"play_media"})
+
 
 def load_config() -> dict:
     with open(ROOT / "config.yaml") as fh:
@@ -103,6 +108,9 @@ scheduler = Scheduler(store, hub, cfg)
 # The sweep lives on the toolbox (it needs the same clock the memory tools
 # use) and runs on the scheduler's tick. One clock, one definition of stale.
 scheduler.sweep = local_tools.sweep
+# Same reasoning for media: it needs a heartbeat to notice a video that ended
+# on its own, and to lift a duck that was never lifted. One tick, two owners.
+scheduler.media = local_tools.media
 _provider = None          # built lazily so the app starts without a key
 _busy = asyncio.Lock()
 _filler_n = 0             # rotates the "one moment" phrases
@@ -468,6 +476,21 @@ async def ws_audio(ws: WebSocket):
                 asyncio.create_task(handle_utterance(text, mode=mode))
 
             elif kind == "state":
+                # Duck anything playing for the WHOLE exchange, not just the
+                # sentences. Lifting the volume between "listening" and
+                # "speaking" means the video jumps back to full while he is
+                # still mid-question, which is worse than not ducking at all.
+                # It comes back up when the conversation ends, which is the
+                # one state that means nobody is talking any more.
+                state = msg.get("state")
+                if state in ("listening", "transcribing"):
+                    local_tools.media.duck(True)
+                elif state == "idle":
+                    local_tools.media.duck(False)
+                # Fullscreen video hides the dashboard, and the dashboard is
+                # the only thing that says whether you have been heard. Put the
+                # same state on the video itself.
+                local_tools.media.show_state(state)
                 await hub.to_display(msg)
 
             elif kind == "cancel":
@@ -512,6 +535,8 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
     async with _busy:
         _cancel.clear()
         await hub.to_display({"type": "transcript", "text": text})
+        # ...and over a video, where the dashboard cannot be seen at all.
+        local_tools.media.show_heard(text)
         # An open case or workout means almost anything said next is aimed at
         # the checklist, and those phrases carry no keyword — "185 for 5",
         # "that's the dips". Knowing a session is open predicts it better than
@@ -668,7 +693,8 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
             # Anything that touched the case redraws the checklist. Ticking a
             # step off and not seeing it go grey is the kind of small silence
             # that makes you stop trusting the screen.
-            if SHOWS_CASE.intersection(reply.tool_calls):
+            if (SHOWS_CASE.intersection(reply.tool_calls)
+                    and not TAKES_SCREEN.intersection(reply.tool_calls)):
                 await hub.to_display({"type": "show_case"})
             if SHOWS_NOTHING.intersection(reply.tool_calls):
                 await hub.to_display({"type": "hide_case"})

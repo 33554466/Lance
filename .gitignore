@@ -8,3 +8,6 @@ __pycache__/
 config.yaml.bak
 config.yaml.broken
 *.bak
+_snapshot/
+logs/
+*.log

@@ -105,14 +105,46 @@ def resolve_devices(cfg: dict) -> None:
         )
 
     a = cfg["audio"]
-    in_idx = find(a.get("input_device"), "input")
-    out_idx = find(a.get("output_device"), "output")
+
+    # Remember the NAMES on first call, and resolve from them every time after.
+    #
+    # This function runs again on every recovery attempt. The old version
+    # finished by writing the resolved INDEX back over the name — and `find()`
+    # returns an int unchanged — so every later call skipped enumeration
+    # entirely and reused a number. That is exactly backwards from what the
+    # docstring above promises, and it failed in the worst possible way:
+    # when the array dropped off the USB bus, index 4 had become the mini PC's
+    # onboard analog codec, so the service bound to the wrong sound card,
+    # failed forever on sample rate, and could not recover even after the
+    # microphone was plugged back in.
+    a.setdefault("input_name", a.get("input_device"))
+    a.setdefault("output_name", a.get("output_device"))
+    in_idx = find(a["input_name"], "input")
+    out_idx = find(a["output_name"], "output")
     a["input_device"], a["output_device"] = in_idx, out_idx
 
-    log.info("audio in  -> [%s] %s", in_idx,
-             devices[in_idx]["name"] if in_idx is not None else "<default>")
-    log.info("audio out -> [%s] %s", out_idx,
-             devices[out_idx]["name"] if out_idx is not None else "<default>")
+    def _describe(idx) -> str:
+        return devices[idx]["name"] if idx is not None else "<default>"
+
+    log.info("audio in  -> [%s] %s", in_idx, _describe(in_idx))
+    log.info("audio out -> [%s] %s", out_idx, _describe(out_idx))
+
+    # Belt and braces on top of the fix. If what we resolved does not look
+    # like what was asked for, say so loudly rather than quietly recording
+    # somebody's onboard line-in for the rest of the day.
+    for label, want, idx in (("input", a["input_name"], in_idx),
+                             ("output", a["output_name"], out_idx)):
+        if isinstance(want, str) and idx is not None \
+                and want.lower() not in _describe(idx).lower():
+            log.error("%s device %r resolved to %r, which does not match. "
+                      "Refusing to use it.", label, want, _describe(idx))
+            raise SystemExit(
+                f"\nconfig.yaml asks for the {label} device {want!r} but the "
+                f"closest match is\n  {_describe(idx)!r}, which is a "
+                f"different piece of hardware.\n\nThis usually means the "
+                f"microphone array is not on the USB bus:\n"
+                f"    lsusb | grep 2886:001a\n\n"
+                f"Unplug it, wait fifteen seconds, plug it back in.\n")
 
 
 def probe_capture(cfg: dict, timeout: float = 4.0) -> bool:
@@ -174,6 +206,30 @@ def probe_capture(cfg: dict, timeout: float = 4.0) -> bool:
     return True
 
 
+# How many times to run the reset ladder before giving up on software and
+# simply waiting. See the note inside ensure_capture_works().
+MAX_RESET_ATTEMPTS = 3
+_recovery_attempts = 0
+
+
+def _try_resolve(cfg: dict) -> bool:
+    """resolve_devices(), but a missing device is False rather than fatal.
+
+    resolve_devices raises SystemExit when it cannot find what config.yaml
+    asks for, which is right when the service is starting up and wrong once it
+    is running: an unplugged microphone is a WAITING problem. Exiting hands it
+    to systemd, which restarts every few seconds, and every restart reloads
+    Whisper — a CPU-burning loop that fixes nothing and stops the service
+    being there when somebody finally plugs the cable back in.
+    """
+    try:
+        resolve_devices(cfg)
+        return True
+    except SystemExit as exc:
+        log.error("%s", exc)
+        return False
+
+
 def ensure_capture_works(cfg: dict) -> bool:
     """Resolve devices, check we can capture, and if not, escalate.
 
@@ -188,7 +244,8 @@ def ensure_capture_works(cfg: dict) -> bool:
     recover from — and it tells the log which boots were wedged, which is the
     number worth watching.
     """
-    resolve_devices(cfg)
+    if not _try_resolve(cfg):
+        return False
     if probe_capture(cfg):
         log.info("capture healthy")
         return True
@@ -197,19 +254,34 @@ def ensure_capture_works(cfg: dict) -> bool:
     if not vid_pid:
         return False
 
-    log.warning("microphone is enumerated but will not stream — recovering")
+    # Stop hammering after a few goes. Measured on this build: repeated
+    # USBDEVFS_RESETs eventually knock the array off the bus ALTOGETHER —
+    # the log shows a reset at 13:38:57, a re-enumeration two seconds later,
+    # and by 13:39:35 no such device to reset at all. Past a few attempts the
+    # resets are not recovery, they are the problem, and the right behaviour
+    # is to keep probing patiently until somebody reseats the cable.
+    global _recovery_attempts
+    _recovery_attempts += 1
+    if _recovery_attempts > MAX_RESET_ATTEMPTS:
+        log.warning("not resetting again (tried %d times) — still waiting for "
+                    "the microphone to be reseated by hand",
+                    _recovery_attempts - 1)
+        return False
+
+    log.warning("microphone is enumerated but will not stream — recovering "
+                "(attempt %d of %d)", _recovery_attempts, MAX_RESET_ATTEMPTS)
 
     if usb_power_cycle(vid_pid,
                        off_seconds=cfg["audio"].get("usb_power_off_seconds", 3)):
-        resolve_devices(cfg)
-        if probe_capture(cfg):
+        if _try_resolve(cfg) and probe_capture(cfg):
             log.info("recovered by power cycling the port")
+            _recovery_attempts = 0
             return True
 
     if usb_reset(vid_pid):
-        resolve_devices(cfg)
-        if probe_capture(cfg):
+        if _try_resolve(cfg) and probe_capture(cfg):
             log.info("recovered by USB reset")
+            _recovery_attempts = 0
             return True
 
     log.error(
@@ -235,6 +307,32 @@ def normalise(text: str) -> str:
     "Stop!" are all the same intent and must all match.
     """
     return " ".join(text.lower().translate(_PUNCT).split())
+
+
+# Words that carry no meaning at the edges of a dismissal. "Okay Lance, go
+# to sleep now please" and "go to sleep" are the same instruction, and a
+# person who has just been told the first one worked will say the second one
+# next time — which is how you end up with a device that obeys sometimes.
+#
+# These are stripped from the ENDS only, and only ever leaving a phrase that
+# is on the list in full. "Stop by the store on the way home" still survives
+# untouched, because "by the store on the way home" is not a dismissal.
+_FILLERS = frozenset("""
+ok okay okey alright allright right yeah yep yup yes no nope
+um uh er erm hmm mm well so just then now please thanks thank
+hey hi hello mate sir buddy man dude actually anyway alright
+""".split())
+
+
+def strip_fillers(norm: str, extra: frozenset[str] | set[str] = frozenset()) -> str:
+    """Trim padding words from both ends of an already-normalised phrase."""
+    fillers = _FILLERS | set(extra)
+    words = norm.split()
+    while words and words[0] in fillers:
+        words.pop(0)
+    while words and words[-1] in fillers:
+        words.pop()
+    return " ".join(words)
 
 
 class AudioService:
@@ -281,6 +379,52 @@ class AudioService:
         }
         self.stop_chime = b.get("stop_chime", True)
 
+        # The assistant's own name is padding inside a dismissal — "Lance,
+        # that's enough" is not a different instruction from "that's enough" —
+        # even though it is anything but padding everywhere else.
+        self.stop_fillers = {normalise(w) for w in b.get("stop_fillers", [])}
+        self.stop_fillers.add(normalise(cfg["identity"]["name"]))
+        self.stop_fillers.discard("")
+
+        # Listen for a dismissal while a reply is playing. Without this,
+        # "go to sleep" works in the follow-up window and does nothing at all
+        # mid-sentence — which reads as unreliable rather than as a gap, and
+        # mid-sentence is exactly when you want it most.
+        self.dismiss_while_speaking = bool(b.get("dismiss_while_speaking", True))
+
+        # Check, ONCE and at startup, that the other files in this package are
+        # the versions this one expects.
+        #
+        # This is not paranoia. The appliance is assembled from a dozen
+        # archives applied over months, and it is entirely possible to end up
+        # with a new service.py beside an old listener.py. When that happened
+        # the symptom was an AttributeError raised on every reply, caught by
+        # the listener loop's catch-all, which abandoned the conversation — so
+        # it presented as "follow-up questions do not work" and named nothing
+        # about the real problem. A missing method is knowable at startup;
+        # discovering it once per utterance is a choice, and the wrong one.
+        missing = [name for obj, name in ((self.listener, "snippet"),
+                                          (self.speaker, "is_busy"))
+                   if not hasattr(obj, name)]
+        if missing:
+            log.error(
+                "this audio/service.py expects %s, which this build of the "
+                "other audio files does not have. Interrupting a reply by "
+                "voice is switched off; everything else — wake word, "
+                "conversation, follow-up questions, saying 'stop' in the gap "
+                "after a reply — works normally. Install the archive that "
+                "ships audio/listener.py and audio/speaker.py alongside this "
+                "file to get it back.", " and ".join(missing))
+            self.dismiss_while_speaking = False
+        self.dismiss_max_seconds = float(b.get("dismiss_max_seconds", 2.5))
+
+        # How long to wait, after the chime, for you to start saying
+        # something. Nothing by then means the wake word fired on its own —
+        # and sitting there with the microphone open for twenty seconds is
+        # what makes an occasional false trigger feel constant.
+        self.wake_speech_timeout = float(
+            cfg["wake_word"].get("speech_timeout_seconds", 0) or 0) or None
+
         # Dictation. A person composing a sentence out loud pauses far
         # longer than one asking a question, so a single endpoint setting
         # cannot serve both. These phrases switch to patient endpointing for
@@ -312,6 +456,135 @@ class AudioService:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ws = None
         self._outbox: asyncio.Queue = asyncio.Queue()
+
+    # -- dismissal ---------------------------------------------------
+
+    def is_dismissal(self, norm: str) -> bool:
+        """Does this utterance mean 'that's enough, go away'?
+
+        Two passes. The whole phrase first, then the phrase with padding
+        trimmed off both ends. Both are EXACT matches against the configured
+        list, which is what keeps "stop by the store on the way home" from
+        ending the conversation — the core of that sentence is not a
+        dismissal, so nothing matches and it goes to the model like anything
+        else.
+
+        What this fixes is the other half of the problem. Whisper writes down
+        what you actually said, and what people actually say is "okay Lance,
+        go to sleep" or "go to sleep now please" — never the bare phrase the
+        list contains. Exact matching alone meant that worked about half the
+        time, and a dismissal that works half the time is worse than one that
+        does not exist, because you keep trying it.
+        """
+        if not norm:
+            return False
+        if norm in self.stop_phrases:
+            return True
+        core = strip_fillers(norm, self.stop_fillers)
+        return bool(core) and core in self.stop_phrases
+
+    def _dismiss(self, why: str) -> None:
+        """Shut up, forget the reply, go back to sleep. Never touches the
+        network — that is the whole point. "Stop" that takes two seconds and
+        a round trip to a data centre is not stopping."""
+        log.info("dismissed: %s", why)
+        self.speaker.stop()                 # cut playback now
+        self.send({"type": "cancel"})       # abandon any generation
+        if self.stop_chime:
+            play_chime(device=self.cfg["audio"].get("output_device"),
+                       kind="sleep")
+        self.listener.drain()
+        self.send({"type": "state", "state": "idle"})
+
+    def _heard_dismissal(self) -> bool:
+        """One pass of listening underneath our own voice. Cheap when quiet.
+
+        Returns True only when a complete short utterance transcribed to a
+        dismissal. Anything else — a cough, the radio, a sentence that is not
+        on the list — is ignored and playback continues, which is the
+        behaviour that makes this safe to leave switched on.
+
+        Every failure in here is swallowed, and that is deliberate. This is a
+        CONVENIENCE: being able to say "that's enough" without waiting for the
+        reply to finish. The conversation it sits inside is the actual
+        feature. The first version let an exception escape, the listener loop's
+        catch-all caught it, logged it, and started over — which abandoned the
+        whole exchange and went back to waiting for the wake word. So a broken
+        interrupt-listener read as "follow-up questions do not work", and the
+        symptom named nothing about the cause.
+
+        After one failure it switches itself off for the rest of the process.
+        A fault here is almost never transient — a missing attribute, a model
+        that will not accept a frame — and retrying it on every reply turns
+        one bug into a conversation that ends early every single time.
+        """
+        if not self.dismiss_while_speaking:
+            threading.Event().wait(0.1)
+            return False
+        try:
+            clip = self.listener.snippet(max_seconds=self.dismiss_max_seconds)
+            if clip.size == 0:
+                return False
+            text = self.listener.transcribe(clip)
+            if not text:
+                return False
+            if self.is_dismissal(normalise(text)):
+                return True
+            log.debug("heard %r while speaking — not a dismissal", text[:60])
+            return False
+        except Exception:  # noqa: BLE001
+            self.dismiss_while_speaking = False
+            log.exception(
+                "listening for a dismissal mid-reply failed — switching it "
+                "off for the rest of this run. Conversations and follow-ups "
+                "are unaffected; you just cannot interrupt a reply by voice "
+                "until this is fixed. Set behaviour.dismiss_while_speaking "
+                "to false in config.yaml to stop this being attempted at all.")
+            threading.Event().wait(0.1)
+            return False
+
+    def _still_playing(self) -> bool:
+        """Playing or about to. Falls back on an older speaker.py.
+
+        `is_busy` covers the gap between two sentences, where `is_speaking` is
+        briefly false while the next one is still queued. If it is not there,
+        use what is — a slightly early follow-up window is a much smaller
+        problem than a crash.
+        """
+        busy = getattr(self.speaker, "is_busy", None)
+        return bool(busy) if busy is not None else self.speaker.is_speaking
+
+    def _await_reply(self, timeout: float, generating: bool = True) -> str:
+        """Wait for the reply to finish, staying interruptible throughout.
+
+        Returns "ok", "dismissed", or "timeout". Previously this was two
+        blocking waits, which meant the microphone was effectively off for the
+        entire length of a reply: telling it to go to sleep mid-sentence did
+        nothing whatsoever, and the same words worked fine two seconds later
+        once the follow-up window opened. That is the whole of "sometimes it
+        works and sometimes it doesn't".
+        """
+        end = time.time() + timeout
+
+        # Phase one: the orchestrator is still generating and queueing.
+        while generating and not self._reply_done.is_set():
+            if time.time() > end:
+                return "timeout"
+            if self._heard_dismissal():
+                return "dismissed"
+
+        # Phase two: the last sentences are still draining out of the
+        # speaker. `is_busy` rather than `is_speaking` — between two sentences
+        # the second is briefly false while the next is still queued, and
+        # coming out of this loop there would reopen the microphone onto the
+        # assistant's own voice.
+        while self._still_playing():
+            if time.time() > end:
+                return "timeout"
+            if self._heard_dismissal():
+                return "dismissed"
+
+        return "ok"
 
     # -- outbound ----------------------------------------------------
 
@@ -393,7 +666,8 @@ class AudioService:
                     self._reply_done.clear()
                     self.send({"type": "state", "state": "listening"})
                     audio = self.listener.capture_utterance(
-                        start_timeout=self.follow_up_seconds if follow_up else None
+                        start_timeout=(self.follow_up_seconds if follow_up
+                                       else self.wake_speech_timeout)
                     )
 
                     self.send({"type": "state", "state": "transcribing"})
@@ -417,7 +691,9 @@ class AudioService:
                                                   if slow else None))
                         else:
                             self.speaker.say("I have not said anything yet.")
-                        self.speaker.wait_until_idle(timeout=90)
+                        if self._await_reply(90, generating=False) == "dismissed":
+                            self._dismiss("mid-repeat")
+                            break
                         self.listener.drain()
                         follow_up = True
                         continue
@@ -442,31 +718,31 @@ class AudioService:
                             break
                         self.send({"type": "transcript", "text": dictated,
                                    "wake_score": -1.0, "mode": "dictation"})
-                        if not self._reply_done.wait(timeout=180):
+                        outcome = self._await_reply(180)
+                        if outcome == "dismissed":
+                            self._dismiss("mid-reply, after dictation")
                             break
-                        if not self.speaker.wait_until_idle(timeout=180):
+                        if outcome != "ok":
                             break
                         self.listener.drain()
                         follow_up = True
                         continue
 
                     # Check for dismissal before anything else looks at this.
-                    if text and norm in self.stop_phrases:
-                        log.info("dismissed by phrase: %r", text)
-                        self.speaker.stop()          # cut playback now
-                        self.send({"type": "cancel"})  # abandon any generation
-                        if self.stop_chime:
-                            play_chime(
-                                device=self.cfg["audio"].get("output_device"),
-                                kind="sleep",
-                            )
-                        self.listener.drain()
-                        self.send({"type": "state", "state": "idle"})
+                    if self.is_dismissal(norm):
+                        self._dismiss(f"heard {text!r}")
                         break
 
                     if not text:
                         if follow_up:
                             log.info("follow-up window closed, back to sleep")
+                        else:
+                            # Nobody said anything after the chime. That is a
+                            # false trigger, and counting them in the log is
+                            # how the threshold gets tuned against this house
+                            # rather than against a benchmark.
+                            log.info("FALSE WAKE — score %.3f, nothing said",
+                                     score)
                         self.send({"type": "transcript", "text": "",
                                    "wake_score": score if not follow_up else -1.0})
                         self.send({"type": "state", "state": "idle"})
@@ -484,10 +760,14 @@ class AudioService:
                         break
 
                     # Wait for the whole reply to finish before listening
-                    # again, or we transcribe our own voice.
-                    if not self._reply_done.wait(timeout=90):
+                    # again, or we transcribe our own voice — but stay
+                    # interruptible while we do, so "that's enough" works
+                    # mid-sentence and not only in the gap afterwards.
+                    outcome = self._await_reply(90)
+                    if outcome == "dismissed":
+                        self._dismiss("mid-reply")
                         break
-                    if not self.speaker.wait_until_idle(timeout=90):
+                    if outcome != "ok":
                         break
 
                     self.listener.drain()
