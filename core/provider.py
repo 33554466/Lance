@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol
 
@@ -138,6 +139,72 @@ class Reply:
     _last_final: object | None = None
 
 
+# Environment variables that must never be handed to a child process.
+# core/media.py launches yt-dlp and mpv; core/desktop.py launches wmctrl and
+# xdotool. yt-dlp in particular is network-facing and runs per-site extractor
+# code, and there is no reason any of them should be able to read the key.
+SECRET_ENV = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+              "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+def child_env(base: dict | None = None) -> dict:
+    """A copy of the environment with every secret removed.
+
+    Belt and braces on top of LoadCredential: with the credential in place the
+    key is not in the environment to begin with, but this file should not have
+    to assume the unit is configured correctly to be safe.
+    """
+    env = dict(base if base is not None else os.environ)
+    for name in SECRET_ENV:
+        env.pop(name, None)
+    return env
+
+
+def read_api_key() -> tuple[str | None, str]:
+    """The API key and where it came from.
+
+    Three places, in order of how much they deserve to be trusted:
+
+      1. systemd's credential directory. The unit declares
+         `LoadCredential=anthropic-key:...`; systemd mounts a 0700 tmpfs,
+         writes the file 0400, and unmounts it when the service stops. The key
+         is never in the process environment, so it is never in
+         /proc/PID/environ and never inherited by mpv, yt-dlp or xdotool.
+      2. The environment, for a manual run or an EnvironmentFile= unit.
+      3. .env in the appliance directory, for `python -m core.app` from a
+         terminal, where nothing has loaded it. python-dotenv is a declared
+         dependency that nothing ever imported, so this was simply broken:
+         the README told you to put the key in .env and then run uvicorn by
+         hand, and that combination has never worked.
+    """
+    d = os.environ.get("CREDENTIALS_DIRECTORY")
+    if d:
+        path = Path(d) / "anthropic-key"
+        try:
+            key = path.read_text(encoding="utf-8").strip()
+            if key:
+                return key, "the systemd credential"
+        except OSError as exc:
+            log.warning("credential directory is set but %s is unreadable "
+                        "(%s)", path, exc)
+
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if key:
+        return key, "the environment"
+
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("ANTHROPIC_API_KEY="):
+                key = line.split("=", 1)[1].strip().strip("'\"")
+                if key:
+                    return key, str(env_file)
+    except OSError:
+        pass
+    return None, "nowhere"
+
+
 def _collect_sources(final) -> list[dict]:
     """Pull deduplicated {title, url} out of a finished message's citations."""
     seen, out = set(), []
@@ -184,13 +251,17 @@ class AnthropicProvider:
         # on a machine with no SDK and no key.
         from anthropic import AsyncAnthropic
 
-        key = os.environ.get("ANTHROPIC_API_KEY")
+        key, source = read_api_key()
         if not key:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. On the appliance this arrives "
-                "via systemd LoadCredential; for a manual run, export it or "
-                "put it in .env with mode 0600."
+                "No API key. On the appliance it arrives through systemd's "
+                "LoadCredential, as a file the service can read and nothing "
+                "else can:\n"
+                "    scripts/setup_credential.sh\n"
+                "For a manual run:  export ANTHROPIC_API_KEY=...  or\n"
+                "    set -a; . .env; set +a"
             )
+        log.info("api key loaded from %s", source)
         self.client = AsyncAnthropic(api_key=key)
         self.prompt_caching = prompt_caching
 

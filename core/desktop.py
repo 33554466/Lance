@@ -46,9 +46,13 @@ ARRANGEMENTS = ("maximize", "restore", "fullscreen", "minimize",
 
 
 def _run(args: list[str]) -> tuple[int, str]:
+    # Secrets stripped from the child environment. wmctrl and xdotool have no
+    # business being able to read an API key, and a subprocess that inherits
+    # one is a subprocess that can leak it.
+    from .provider import child_env
     try:
         p = subprocess.run(args, capture_output=True, text=True,
-                           timeout=TIMEOUT)
+                           timeout=TIMEOUT, env=child_env())
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except FileNotFoundError:
         return 127, f"{args[0]} is not installed"

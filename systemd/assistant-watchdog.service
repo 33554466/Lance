@@ -1,8 +1,21 @@
 # ~/.config/systemd/user/assistant-watchdog.service
+#
+# Paired with assistant-watchdog.timer. Enable the TIMER, not this:
+#   systemctl --user enable --now assistant-watchdog.timer
+#
+# What it is for: the failure systemd cannot see. A crash restarts itself; a
+# process that is alive, connected and answering, but deaf, does not.
+
 [Unit]
 Description=Assistant health check
+# No point checking a service that is not meant to be running.
+ConditionPathExists=%h/assistant/scripts/watchdog.sh
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/assistant
 ExecStart=%h/assistant/scripts/watchdog.sh
+# A stuck curl must not leave a watchdog running into the next one.
+TimeoutStartSec=45
+NoNewPrivileges=yes
+ProtectSystem=full

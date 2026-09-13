@@ -10,20 +10,54 @@
 Description=Assistant orchestrator
 After=network-online.target
 Wants=network-online.target
+# Keep restarting even after repeated rapid failures. Degrade, never die: an
+# appliance that gives up at 3am is one you find dead in the morning.
+StartLimitIntervalSec=0
 
 [Service]
 # Window management runs from here, and needs to know which X display to
 # talk to. Harmless when there is no desktop — the tools detect that and
 # say so rather than failing obscurely.
 Environment=DISPLAY=:0
+# The migration code prints to stdout, and stdout is block-buffered under
+# systemd. Without this the one message you most want in the journal —
+# "MEMORY MIGRATION FAILED, your backup is at ..." — can be lost on a kill.
+Environment=PYTHONUNBUFFERED=1
 Type=simple
 WorkingDirectory=%h/assistant
-EnvironmentFile=%h/assistant/.env
+
+# The API key, as a credential rather than an environment variable.
+#
+# systemd mounts a 0700 tmpfs at $CREDENTIALS_DIRECTORY, writes the file 0400,
+# and unmounts it when the service stops. Three things follow, all of which
+# EnvironmentFile= gets wrong:
+#
+#   * The key is never in the process environment, so it is not in
+#     /proc/<pid>/environ and not inherited by mpv, yt-dlp, wmctrl or xdotool.
+#     yt-dlp is network-facing and runs per-site extractor code.
+#   * It cannot be swept up by a `tar` of the project directory — which is
+#     exactly how a key got shared once.
+#   * Rotation is: write the file, restart the unit.
+#
+# Create it with:  scripts/setup_credential.sh
+LoadCredential=anthropic-key:%h/assistant/secrets/anthropic-key
+
 ExecStart=%h/assistant/.venv/bin/uvicorn core.app:app --host 127.0.0.1 --port 8760
 Restart=always
 RestartSec=3
-# Degrade, never die: keep restarting even after repeated rapid failures.
-StartLimitIntervalSec=0
+# Back off instead of hammering: a permanent failure (missing model, broken
+# venv) otherwise writes 20 restarts a minute into the journal forever.
+RestartSteps=5
+RestartMaxDelaySec=60
+
+# Cheap hardening. Deliberately NOT ProtectHome — everything this service
+# owns lives in the home directory: the venv, models/, data/ (SQLite and the
+# mpv control socket), the notes folder, the workouts folder.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=default.target

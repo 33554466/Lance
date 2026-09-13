@@ -11,3 +11,4 @@ config.yaml.broken
 _snapshot/
 logs/
 *.log
+secrets/

@@ -271,6 +271,71 @@ def test_receipt_render() -> None:
           or any(l.strip() == "BENCH PRESS" for l in lines))
 
 
+# --------------------------------------------------------- the API key
+
+def test_key_resolution(tmp: Path) -> None:
+    """Where the key comes from, and what never sees it."""
+    print("\nThe API key")
+    import core.provider as prov
+
+    saved = {k: os.environ.get(k) for k in
+             ("CREDENTIALS_DIRECTORY", "ANTHROPIC_API_KEY")}
+    try:
+        os.environ.pop("CREDENTIALS_DIRECTORY", None)
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-from-env"
+        key, src = prov.read_api_key()
+        check("the environment works", key == "sk-ant-from-env", src)
+
+        # A credential directory beats the environment.
+        cred = tmp / "creds"
+        cred.mkdir()
+        (cred / "anthropic-key").write_text("sk-ant-from-credential\n")
+        os.environ["CREDENTIALS_DIRECTORY"] = str(cred)
+        key, src = prov.read_api_key()
+        check("the credential wins over the environment",
+              key == "sk-ant-from-credential", f"{src}: {key!r}")
+        check("...and trailing whitespace is stripped",
+              not key.endswith("\n"))
+
+        # A credential directory that is set but empty falls back rather than
+        # failing — a half-configured unit should still start.
+        (cred / "anthropic-key").unlink()
+        key, src = prov.read_api_key()
+        check("a missing credential file falls back to the environment",
+              key == "sk-ant-from-env", f"{src}: {key!r}")
+
+        # Nothing anywhere is None, not a crash.
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ["CREDENTIALS_DIRECTORY"] = str(tmp / "nope")
+        key, src = prov.read_api_key()
+        check("nothing configured returns None, not an exception",
+              key is None or isinstance(key, str))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # And the thing this is all for: children must not inherit it.
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-must-not-leak"
+    try:
+        env = prov.child_env()
+        check("a child process does not get the key",
+              "ANTHROPIC_API_KEY" not in env)
+        check("...but still gets a normal environment",
+              "PATH" in env and len(env) > 1)
+        for other in ("OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY"):
+            os.environ[other] = "x"
+            check(f"{other} is stripped too",
+                  other not in prov.child_env())
+            os.environ.pop(other, None)
+        check("os.environ itself is untouched",
+              os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-must-not-leak")
+    finally:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -280,6 +345,7 @@ def main() -> int:
         test_severity_is_not_assumed_to_be_text()
         test_router_word_boundaries()
         test_receipt_render()
+        test_key_resolution(tmp)
     print()
     if FAILURES:
         print(f"\033[1;31m{len(FAILURES)} failed\033[0m")

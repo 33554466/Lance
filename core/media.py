@@ -455,7 +455,13 @@ class Player:
         self.stop()
         cmd = self.command(hit, audio_only)
 
-        env = dict(os.environ)
+        # mpv and yt-dlp get the environment MINUS anything secret. yt-dlp is
+        # network-facing and runs per-site extractor code; there is no reason
+        # it should be able to read an API key. With systemd's LoadCredential
+        # the key is not in the environment anyway — this is what makes that
+        # true regardless of how the unit happens to be configured.
+        from .provider import child_env
+        env = child_env()
         if not audio_only and self.display:
             env["DISPLAY"] = self.display
 

@@ -33,6 +33,7 @@ stack. Every audio bug stays a Python bug.
 git clone <your repo> ~/assistant && cd ~/assistant
 ./install.sh                     # apt + venv + models, ~15 min
 nano .env                        # ANTHROPIC_API_KEY=...
+./scripts/setup_credential.sh    # moves it into a systemd credential
 ```
 
 ## Run it by hand (do this first)
@@ -58,12 +59,15 @@ microphone at all. Then say the wake word.
 ```bash
 ./scripts/check_peripherals.sh   # mic, printer, scanner, camera, network
 ./scripts/measure_network.sh     # wired vs wireless, on YOUR network
-python -m tests.test_pipeline    # orchestrator, router, store, protocol
+.venv/bin/python -m tests.run    # every suite; exits with the number that failed
+.venv/bin/python -m tests.run --quiet         # one line each
+.venv/bin/python -m tests.run store tools     # just these two
 curl -s localhost:8760/healthz | jq
 curl -s localhost:8760/stats/wake | jq   # read this daily for a week
 ```
 
-`test_pipeline` exercises everything except the network call and the sound
+`tests/run.py` picks up anything matching `tests/test_*.py`, so a new suite
+needs no wiring. `test_pipeline` exercises everything except the network call and the sound
 card. If it passes and the device still misbehaves, the problem is hardware
 or credentials.
 
@@ -102,7 +106,8 @@ is almost always a false positive.
 mkdir -p ~/.config/systemd/user
 cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now assistant-core assistant-audio assistant-watchdog.timer
+systemctl --user enable --now assistant-core assistant-audio
+systemctl --user enable --now assistant-watchdog.timer   # the timer, not the service
 loginctl enable-linger $USER     # runs without you logged in
 journalctl --user -u assistant-audio -f
 ```

@@ -1,7 +1,15 @@
 # ~/.config/systemd/user/assistant-ui.service
 #
-# Chromium in kiosk mode. Display only — it has no microphone permission
-# and no audio path, deliberately. All audio lives in Python.
+# The kiosk display. This file matches what is RUNNING on the appliance —
+# the repo copy had drifted and would have broken it:
+#
+#   * /usr/bin/chromium-browser does not exist on Ubuntu 24.04. The deb of
+#     that name is a transitional package for the snap, and the binary is
+#     /snap/bin/chromium.
+#   * XAUTHORITY is required to open :0 from a lingering user manager, which
+#     is how this runs when nobody has logged in.
+#   * /dashboard, not the ambient screen — the ambient one silently drops the
+#     `reminder` message because ui/index.html has no case for it.
 
 [Unit]
 Description=Assistant kiosk display
@@ -11,16 +19,19 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 Environment=DISPLAY=:0
-ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/chromium-browser \
-    --kiosk \
-    --app=http://127.0.0.1:8760 \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-features=TranslateUI \
-    --check-for-update-interval=31536000 \
-    --incognito
+Environment=XAUTHORITY=%h/.Xauthority
+# Wait for the orchestrator to actually answer, rather than guessing.
+#
+# `After=assistant-core.service` with Type=simple guarantees nothing: systemd
+# calls core "started" the instant exec succeeds, and uvicorn takes a few more
+# seconds to bind. The old `sleep 5` won that race most of the time. Losing it
+# means Chromium loads an error page and — in kiosk mode with --noerrdialogs —
+# sits on it forever, because it never exits and Restart=always never fires.
+# You come back to a blank screen and nothing in the logs.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do curl -fsS --max-time 2 http://127.0.0.1:8760/healthz >/dev/null 2>&1 && exit 0; sleep 1; done; exit 0'
+ExecStart=/snap/bin/chromium --kiosk --disk-cache-size=1 --incognito --noerrdialogs --disable-infobars \
+    --disable-session-crashed-bubble --check-for-update-interval=31536000 \
+    http://127.0.0.1:8760/dashboard
 Restart=always
 RestartSec=5
 

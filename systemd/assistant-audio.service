@@ -8,6 +8,9 @@
 Description=Assistant audio pipeline
 After=assistant-core.service pipewire.service
 Wants=assistant-core.service
+# Degrade, never die. This belongs in [Unit]; it was in [Service], which
+# systemd still honours but warns about.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -16,12 +19,24 @@ WorkingDirectory=%h/assistant
 # any subprocess that expects to find its tools there. speaker.py resolves
 # piper explicitly and does not rely on this, but anything added later might.
 Environment=PATH=%h/assistant/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/assistant/.venv/bin/python -m audio.service
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
-# Model loading takes ~20s on first start; do not let systemd think it hung.
+# Model loading takes ~20s on first start. Note this is decorative with
+# Type=simple — startup "completes" at exec — and is kept only as a marker
+# for the day this becomes Type=notify.
 TimeoutStartSec=180
+# The one timeout that actually bites. A process wedged on the sound card
+# otherwise gets the default 90 seconds before SIGKILL, which is 90 seconds
+# of a deaf appliance every time you restart it.
+TimeoutStopSec=10
+
+# NoNewPrivileges is deliberately absent: audio/usbpower.py escalates to
+# `sudo -n uhubctl` as part of the microphone recovery ladder, and
+# NoNewPrivileges kills setuid.
+ProtectSystem=full
+PrivateTmp=yes
 
 [Install]
 WantedBy=default.target
