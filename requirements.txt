@@ -1,20 +1,28 @@
 # Home AI Appliance — Python dependencies
 #
-# These are deliberately loose. Install, get the thing working, then
-# immediately run:
+# These are deliberately loose: this file says WHAT the appliance needs.
+# requirements.lock.txt says exactly what was installed when it last worked,
+# and that is what you rebuild from:
 #
-#     pip freeze > requirements.lock.txt
+#     pip install -r requirements.lock.txt
+#     pip install --no-deps 'openwakeword==0.6.0'
 #
-# and install from the lock file thereafter. An appliance that silently
-# changes behaviour because a transitive dependency shipped a new minor
-# version is an appliance you will be debugging at an inconvenient moment.
+# The lock file used to be in .gitignore, which is why it went fifteen days
+# stale and fourteen packages short — every dependency of the printer,
+# semantic recall and media playback was missing from it. It is tracked now.
+# Re-freeze whenever you add something: ./install.sh writes a .new and shows
+# you the diff rather than overwriting it behind your back.
 
 # --- orchestrator ---
 fastapi>=0.110
 uvicorn[standard]>=0.29
 websockets>=12.0
 PyYAML>=6.0
-python-dotenv>=1.0
+# python-dotenv is NOT here. It was declared for a year and never imported —
+# which meant the README's "put the key in .env, then run uvicorn by hand"
+# never worked: systemd loaded it via EnvironmentFile, a terminal did not.
+# core/provider.py now reads .env itself, in six lines, as the last of three
+# fallbacks behind the systemd credential and the environment.
 
 # --- provider ---
 anthropic>=0.40
@@ -63,6 +71,18 @@ piper-tts>=1.2.0
 # cannot resolve without it.
 pyusb>=1.2.1
 python-escpos>=3.0
+
+# --- media playback ---
+# yt-dlp searches YouTube and resolves stream URLs; mpv (an apt package, see
+# install.sh) plays them. Kept LOOSE on purpose, and pinned in the lock file:
+# yt-dlp breaks whenever YouTube changes, so the floor here is a floor, not a
+# target. Ubuntu's apt package is years behind and fails extraction on
+# everything — install it in this venv, not with apt.
+#
+# mpv finds it through --script-opts=ytdl_hook-ytdl_path, which core/media.py
+# sets explicitly, because a systemd user service's PATH does not include
+# this venv's bin directory.
+yt-dlp>=2025.1.1
 
 # --- semantic recall ---
 # ONNX sentence embeddings. Chosen over sentence-transformers specifically

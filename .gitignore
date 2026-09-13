@@ -1,14 +1,29 @@
+# Secrets. `.env*` with an exception rather than a bare `.env`, so .env.local
+# and .env.prod cannot slip through. secrets/ holds the systemd credential.
+.env*
+!.env.example
+secrets/
+
 .venv/
-models/
-data/
 __pycache__/
 *.pyc
-.env
-*.wav
-config.yaml.bak
-config.yaml.broken
-*.bak
-_snapshot/
+
+# State and blobs: the SQLite database, the mpv socket, model files.
+data/
+models/
+
+# Diagnostic captures and stray logs. Nothing writes to logs/ — it all goes
+# to the journal — but the directory exists, so keep it out of the way.
 logs/
 *.log
-secrets/
+_snapshot/
+
+config.yaml*.bak
+config.yaml.broken
+
+# requirements.lock.txt is deliberately NOT ignored.
+#
+# It was, which is why it sat fifteen days stale and fourteen packages short
+# of reality — including every dependency of the printer, semantic recall and
+# media playback. The lock file is the answer to "what was installed when
+# this worked", and it is worthless if it cannot be committed.
