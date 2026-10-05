@@ -209,38 +209,29 @@ documents:
   max_chars: 20000
 
 casework:
-  # Investigations with a clock on them. Say "I'm starting a phishing email
-  # investigation" and Lance opens a case: the SLA starts, the checklist goes
-  # on the monitor, and he tracks both columns until you close it.
-  enabled: true
-
-  # One YAML file per kind of case. Re-read every time a case opens, so you
-  # can fix a step in a text editor and the next case has it — no restart.
+  # OFF. The phishing investigation feature was removed — it lives on the
+  # work machine now.
+  #
+  # The block stays, and core/casework.py stays with it, because WORKOUTS ARE
+  # BUILT ON THIS MACHINERY. A training session is a row in `cases`, the
+  # checklist on the monitor is the case overlay, and "that's the dips" is
+  # ticked off by the case step matcher. None of that is gated on the flag
+  # below — only the ten case TOOLS and the SLA clock are.
+  #
+  # Set this back to true and rename playbooks/phishing.yaml.disabled to get
+  # the whole thing back, exactly as it was.
+  enabled: false
   playbook_dir: "~/assistant/playbooks"
-
-  sla:
-    # Minutes from the moment you say you are starting.
-    #
-    # THESE NUMBERS ARE PLACEHOLDERS. They are what a mid-sized shop tends to
-    # run, not what YOUR shop runs. Put your real ones here — this is the one
-    # setting in this block that is wrong until you change it.
-    default: 240
-    tiers:
-      critical: 60
-      high: 120
-      standard: 240
-      low: 480
-
-    # Speak up at these fractions of the window...
-    warn_at: [0.5, 0.75]
-    # ...and always this many minutes out, whatever the tier. Fractions alone
-    # are wrong for a short SLA: 90% of an hour is six minutes of notice.
-    warn_final_minutes: 15
 
 printer:
   # MUNBYN ITPP047. It reports itself as a Seiko Epson TM-m30-II, which is
   # whose ESC/POS dialect it speaks.
   enabled: true
+
+  # A workout sheet with a dotted line under every exercise is one you can
+  # write on with a pencil in the garage. Without them it is a third shorter
+  # and better for a glance. Entirely a matter of taste, so: a setting.
+  workout_write_lines: true
 
   # Measured on the device by printer_probe, not guessed. The IN endpoint is
   # 0x81 here; the usual guess is 0x82 and it would have failed as a silent
@@ -360,6 +351,27 @@ router:
   # Sonnet instead of Haiku on these costs a fraction of a cent and buys the
   # right tool being called.
   tool_markers:
+    - "rounds"
+    - "emom"
+    - "amrap"
+    - "tabata"
+    - "interval"
+    - "when i say"
+    - "on my mark"
+    - "wait for me"
+    - "timer"
+    - "countdown"
+    - "on and"
+    - "seconds off"
+    - "seconds on"
+    - "self check"
+    - "self-check"
+    - "diagnostic"
+    - "health check"
+    - "check yourself"
+    - "test yourself"
+    - "everything working"
+    - "everything ok"
     - "play"
     - "put on"
     - "pull up"
@@ -379,15 +391,14 @@ router:
     - "not that one"
     - "next one"
     - "workout"
+    - "print my workout"
+    - "on paper"
+    - "print the session"
     - "exercise"
     - "session"
     - "lift"
     - "rest timer"
-    - "case"
-    - "phishing"
-    - "investigation"
     - "checklist"
-    - "sla"
     - "print"
     - "board"
     - "list"
@@ -536,39 +547,19 @@ context:
     Use recall to search past conversations when they refer to something from
     before that is not in what you already know.
 
-    {user} runs investigations at work. When he says he is starting one —
-    "I am starting a phishing email investigation" — call start_case
-    immediately. Do not ask which playbook, how urgent it is, or for a ticket
-    number first. The clock started when he said it started, and every
-    question you ask before opening the case is time off it. If he gave a
-    reference or a severity, pass them; if not, leave them out.
-
-    While a case is open, keep replies to one sentence. He is reading a
-    screen and working, not having a conversation.
-
-    When he says he did something, tick it off with check_step using his own
-    words — matching handles the wording, so do not translate it. If he also
-    said what he FOUND, pass it as the finding: "the domain was registered
-    four days ago" belongs on that step, and it is what turns the write-up at
-    the end into transcription instead of recall.
-
-    Never tick off a step he did not say he did. An unticked step costs him
-    ten seconds. A wrongly ticked one reads afterwards as work that was done,
-    and that is how a thing gets missed.
-
-    If it is unclear which step he means, ask one short question naming the
-    two candidates rather than guessing.
-
     You can print on paper. Use print_list when {user} wants a list to take
-    with him, and print_case for the investigation.
+    with him.
+
+    Use print_workout for training. "Print my workout", "put today's session
+    on paper", "print full body A" is one session — the exercises with boxes
+    to tick. "Print my workouts", "what have I got this week", "print the
+    schedule" is what='schedule' instead: the programme, not one session.
+    Plural usually means the schedule; singular usually means the session.
+    With no name it is today's, or the next one if today is a rest day, and
+    she will say which she printed.
 
     Printing IS the reply. Confirm in one short sentence and do not read the
     items back — the paper is the point, and reciting it defeats the point.
-
-    For the case, pick `only` from what was asked. "What have I still got to
-    do" is open. "Print my findings", or anything about writing the report, is
-    findings. A handover or a full write-up is all. The full record runs to
-    about a foot of paper, so do not print it when the short one was wanted.
 
     If a print fails you will get a plain sentence back — no printer, no
     access, no response. Say that sentence and stop. Do not retry, and do not
@@ -629,6 +620,88 @@ context:
 
     You cannot queue things up, make playlists, or resume something from
     yesterday, and you should say so plainly rather than pretending.
+
+    You can check yourself over. Use run_self_check when {user} asks for a
+    diagnostic, a health check, a self test, whether everything is working, or
+    whether one particular thing works — the printer, the microphone, the
+    internet. Use it for the single-item questions too: the answer for one is
+    part of the same check, and a failure somewhere else is worth knowing.
+
+    It takes up to a minute, so say one short sentence first — "Let me check
+    myself over." — and then run it. Never run it twice in one conversation
+    unless something was fixed in between.
+
+    Reporting it is the part that matters. Lead with the verdict in one
+    sentence: everything passed, or how many problems there are. Then name at
+    most three, worst first, in the words the check used. Do not read the list
+    out; the whole report is on the screen and you should say so.
+
+    If something failed, say what to do about it — each check knows. Give the
+    shortest version out loud and leave the exact command to the screen; a
+    shell command read aloud helps nobody.
+
+    Set print_it when asked to print the check or for a record of it. Do not
+    print it otherwise.
+
+    You cannot fix what you find. Say what is wrong and what would fix it,
+    and do not offer to restart services or reinstall anything — you have no
+    tool for it, and the watchdog handles the restarts that are safe to make.
+
+    You can run an interval timer for training. Use start_interval_timer for
+    anything with rounds, work and rest, or a fixed block of time to move in.
+    It is NOT set_reminder — that is for one-off timers and clock times, and a
+    workout interval is neither.
+
+    Four shapes, and the words {user} will use for them:
+
+    Rounds. "Forty on, twenty off, eight rounds" is kind=rounds work=40
+    rest=20 rounds=8. "Tabata" means work=20 rest=10 rounds=8. "Three rounds
+    of a minute" with no rest is work=60 rounds=3.
+
+    EMOM, every minute on the minute. "EMOM for twelve" is kind=emom
+    rounds=12. If he says a different interval — "every ninety seconds for ten
+    rounds" — pass every=90.
+
+    A repeating mark. "Beep every two minutes for twenty" is kind=beep
+    every=120 minutes=20.
+
+    One countdown. "Twenty minute AMRAP", "five minute plank", "a two
+    thousand metre row" is kind=countdown minutes=20 with a label — AMRAP,
+    Plank, Row — so the screen says what he is doing.
+
+    Work the seconds out yourself. "A minute on, thirty seconds off" is
+    work=60 rest=30. Never ask him to confirm the arithmetic.
+
+    He may want a moment before it starts. Two ways, and they are different.
+
+    A longer count-in: "give me thirty seconds first", "start in a minute" is
+    lead_in=30 or lead_in=60. Leave lead_in out for the usual short count-in.
+    lead_in=0 starts on the word.
+
+    Held, for an open-ended wait: "start it when I say go", "wait for me",
+    "on my mark", "set it up but do not start". Pass hold=true. The timer goes
+    on the screen and the clock does not move until he says go, however long
+    that takes. Release it with interval_control action=go. Do not guess a
+    number of seconds for this — an open-ended wait is what hold is for.
+
+    Say one short sentence and stop. She counts him in out loud and the screen
+    carries the clock, so a long confirmation is just talking over the count.
+
+    Use interval_control for go, pause, resume, stop, skip, status, add,
+    less, show and hide. "Go", "begin", "start" and "I am ready" are action=go — it
+    releases a held timer and resumes a paused one.
+    "Give me another thirty seconds" is add with seconds=30. "How long left"
+    is status. Keep these replies to a few words — he is out of breath.
+
+    If a timer is already running and he asks for another, the new one
+    replaces it. Say so in three words.
+
+    The clock is not the timer. "Show me the board", "put the shopping list
+    up", "show my workout" all work while a timer is running — the clock
+    steps aside, the timer keeps going, and he keeps being counted down out
+    loud. Do not stop a timer to show him something, and do not tell him he
+    has to. "Hide the timer" and "put the clock away" are interval_control
+    action=hide; "show the timer", "where is the clock" are action=show.
 
     If you do not know something and cannot look it up, say so in one short
     sentence rather than guessing. If a request is ambiguous, ask one
@@ -1040,6 +1113,145 @@ media:
 
   mpv_bin: "mpv"
   ytdlp_bin: "/home/lance/assistant/.venv/bin/yt-dlp"
+
+selfcheck:
+  # Check everything, once a day, and say nothing unless something is wrong.
+  #
+  # The failure this exists for is not a crash. It is the Tuesday you say
+  # "print the shopping list" and nothing happens, because the printer has
+  # been unplugged since Saturday. Nothing was broken in a way anybody could
+  # see — there was just no reason to look.
+  #
+  # Ask any time: "run a self check", "is everything working", "test yourself".
+  #   curl -s localhost:8760/selfcheck | jq          # the last report
+  #   curl -s 'localhost:8760/selfcheck?run=1' | jq  # a fresh one
+  # Press d on the appliance's own keyboard to put the last one on screen.
+  enabled: true
+
+  # --- the daily run ---
+  daily: true
+  # Local hour, 24-clock. The check runs the first time the clock passes this
+  # after a fresh day begins, so a machine that was off all morning still gets
+  # checked when it comes back rather than skipping the day.
+  daily_hour: 7
+
+  # Speak up when everything is FINE as well as when it is not.
+  #
+  # Leave this false. A daily report that says "all thirty checks passed" is a
+  # report you stop hearing within a week — and the one that matters goes past
+  # you along with it. Silence is the signal.
+  announce_when_healthy: false
+
+  # Print the daily result. Only when something is wrong, unless
+  # print_everything is true.
+  #
+  # Worth knowing why this is on: the slip existing at all is proof the printer
+  # works. Every other check in the report is an assertion about hardware; this
+  # one is the hardware agreeing.
+  print_daily: true
+  print_everything: false
+
+  # --- the checks that cost something ---
+  # One call to the cheapest model, about $0.0001. It is the ONLY thing that
+  # proves the API key is valid — reaching the host only proves the network.
+  test_api: true
+  # A real web search, about a cent. Proves the search tool itself works,
+  # rather than just that the API answers.
+  test_web_search: true
+  # A real YouTube search. Free, takes two seconds, and this is the thing that
+  # rots silently: yt-dlp breaks whenever YouTube changes.
+  test_youtube: true
+
+  # --- thresholds ---
+  disk_warn_gb: 5
+  disk_fail_gb: 1
+  # Warn if the last 24 hours cost more than this. Not a kill switch — the
+  # provider console cap is the real backstop.
+  spend_warn_usd: 3.0
+  # Warn if this percentage of wake-word triggers had nothing said after them.
+  false_wake_warn_pct: 50
+  # Warn about a case or workout left open longer than this. An open session
+  # routes every request to the bigger model, and it is invisible.
+  stale_case_hours: 18
+  # No single check may take longer than this before it is abandoned and
+  # reported as a failure. A diagnostic that hangs has become the outage.
+  check_timeout_seconds: 12
+
+status:
+  # The status wall: the same twenty-six probes as the daily self check,
+  # run continuously instead of once a day.
+  #
+  #   http://192.168.0.44:8760/status    on anything with a browser
+  #   the strip along the bottom of the appliance's own screen
+  #
+  # Reading the page costs nothing. The probes run on the orchestrator's own
+  # one-second tick and the page reads the cache, so leaving it open on a
+  # spare monitor all day adds no work at all.
+  enabled: true
+
+  # How stale each kind of reading is allowed to get, in seconds. This is the
+  # whole design: "ping everything constantly" is not something you can do to
+  # this box.
+  #
+  #   fast    process memory and SQLite. Free. Near-live.
+  #   medium  a stat, a socket, a subprocess.
+  #   slow    touches hardware or loads a model — the PRINTER is here, over
+  #           USB, and hammering it while a receipt is going through is how
+  #           you wedge it. Leave this one alone.
+  #   deep    a real network call that costs money: the model API, web
+  #           search, YouTube. Four times a day is plenty.
+  every:
+    fast: 5
+    medium: 60
+    slow: 900
+    deep: 21600
+
+  # Probes started per tick. The tick is one second; without a cap, a whole
+  # tier coming due together would put twenty probes on threads at once and
+  # the printer would be one of them.
+  per_tick: 2
+
+  # A FAILING probe is re-read this often regardless of its tier — it is the
+  # one you are stood in front of the screen waiting to go green, and waiting
+  # fifteen minutes to find out you fixed it is the wrong experience.
+  retry_failed_seconds: 15
+
+intervals:
+  # An interval timer you can drive with your hands full.
+  #
+  #   "forty seconds on, twenty off, eight rounds"
+  #   "EMOM for twelve minutes"
+  #   "beep every ninety seconds for twenty minutes"
+  #   "twenty minute AMRAP"
+  #
+  # She calls the changes, the round numbers and the last few seconds, so you
+  # are not squinting at a phone on the floor between burpees. The screen goes
+  # to a full-bleed clock: green to move, amber to breathe, red for the last
+  # five seconds.
+  #
+  # Say "pause", "carry on", "skip", "add thirty seconds", "how long left",
+  # "stop the timer".
+  enabled: true
+
+  # Counted in before the first work interval, so you are not caught standing
+  # still. Set to 0 to start immediately.
+  lead_in_seconds: 5
+
+  # Speak the last few seconds of each phase — "three, two, one" — so you can
+  # time the last rep rather than being surprised by the change.
+  count_last_seconds: 3
+  # ...but not on a phase barely longer than the count itself. Being counted
+  # down from three on a five-second rest is noise, not information.
+  count_min_phase_seconds: 8
+
+  # A tone on every change as well as the words. Different tones for work and
+  # rest: you learn them in one session and stop needing the words.
+  chime: true
+  # Say "round three of eight" at the start of each work interval. It goes
+  # with the work, not the rest — it is the thing you are about to do.
+  announce_rounds: true
+
+  finish_phrase: "Time. Well done."
 
 storage:
   db_path: "data/assistant.db"

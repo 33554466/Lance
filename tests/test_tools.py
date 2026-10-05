@@ -336,6 +336,167 @@ def test_key_resolution(tmp: Path) -> None:
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
 
+
+def test_printed_workout(tmp: Path) -> None:
+    """A session on paper, and the programme on paper.
+
+    Nothing here touches a printer: the layout is built as text first
+    precisely so it can be checked without one, and so a formatting mistake
+    cannot leave the cutter uncalled halfway down a sheet.
+    """
+    print("\nWorkouts on paper")
+    import yaml
+    from core.tools import build_tools
+    from core.db import Store
+
+    folder = tmp / "workouts"
+    folder.mkdir()
+    (folder / "2026-01-02-full-body-a.txt").write_text(
+        "# Full Body A\n"
+        "## Main\n"
+        "Bench press, 5 x 5 @ 185 | rest 180\n"
+        "Dips, 3 x AMRAP\n"
+        "## Finisher\n"
+        "A very long accessory movement name that has to fold across more "
+        "than one line of receipt paper, 3 x 12\n")
+    (folder / "2026-01-03-conditioning.txt").write_text(
+        "# Conditioning\n## Main\nAir bike, 20 minutes\n")
+    (folder / "calf-block.txt").write_text("# Calf Block\nCalf raises, 4x15\n")
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    cfg["workouts"]["path"] = str(folder)
+    cfg["workouts"]["default_rest_seconds"] = 90
+    cfg.setdefault("printer", {})["enabled"] = True
+    box = build_tools(cfg, Store(str(tmp / "print.db")))
+    pr, wk = box.printer, box.workouts
+
+    names = [x["name"] for x in pr.schemas()]
+    check("she has a tool for it", "print_workout" in names, str(names))
+
+    path, _why = wk.resolve("full body a")
+    check("a spoken name finds the file", path is not None)
+    title, steps = wk.read(path)
+
+    sheet = pr.build_workout(title, steps, default_rest=90).preview()
+    lines = sheet.splitlines()
+    check("nothing runs off the paper",
+          max(len(x) for x in lines) <= 42,
+          f"widest is {max(len(x) for x in lines)}")
+    check("the session is named", "FULL BODY A" in sheet, lines[1])
+    check("sections are headed", "MAIN" in sheet and "FINISHER" in sheet)
+    check("every exercise has a box",
+          sheet.count("[ ] ") == len(steps),
+          f'{sheet.count("[ ] ")} boxes for {len(steps)} exercises')
+    check("a long exercise folds rather than truncating",
+          "receipt paper" in sheet)
+    check("a non-default rest is printed", "rest 3:00" in sheet, sheet)
+    check("...and the default is not repeated down the page",
+          sheet.count("rest 1:30") == 0)
+    check("the default is stated once at the foot",
+          "rest 90s unless noted" in sheet)
+    check("the exercise count is on it", "3 exercises" in sheet)
+
+    plain = pr.build_workout(title, steps, write_lines=False).preview()
+    check("write lines can be turned off",
+          "..." not in plain and "..." in sheet)
+    check("...and that is all that changes",
+          len(plain.splitlines()) == len(lines) - len(steps),
+          f"{len(plain.splitlines())} vs {len(lines)}")
+
+    programme = pr.build_schedule(wk.schedule()).preview()
+    check("the schedule prints every file",
+          all(w in programme for w in ("full body a", "conditioning",
+                                       "calf block")),
+          programme)
+    check("...dated ones by date",
+          programme.index("full body a") < programme.index("conditioning"))
+    check("...and undated ones apart",
+          "ANY TIME" in programme
+          and programme.index("ANY TIME") < programme.index("calf block"))
+    check("the schedule also fits the paper",
+          max(len(x) for x in programme.splitlines()) <= 42)
+
+    # The refusals are spoken aloud, so they have to be sentences.
+    said = pr.run_sync("print_workout", {"name": "leg day"})
+    check("an unknown session names what there is",
+          "no workout called" in said.lower() and "full body a" in said.lower(),
+          said)
+
+
+
+def test_casework_off_keeps_workouts(tmp: Path) -> None:
+    """The feature goes; the machinery it was built on stays.
+
+    Workouts ride on casework: a session is a row in `cases`, the screen is
+    the case overlay, and "that's the dips" is matched by the case step
+    matcher. Turning the FEATURE off must not touch any of that. This is the
+    test that would catch someone later deciding the tidy thing to do is
+    gate the matcher on the same flag.
+    """
+    print("\nCasework off, workouts on")
+    import copy
+    import yaml
+    from core.tools import build_tools
+    from core.db import Store
+
+    folder = tmp / "wk"
+    folder.mkdir()
+    (folder / "2026-01-02-push.txt").write_text(
+        "# Push Day\n## Main\nBench press, 5 x 5 @ 185\nDips, 3 x AMRAP\n")
+
+    base = yaml.safe_load((ROOT / "config.yaml").read_text())
+    base["workouts"]["path"] = str(folder)
+    base.setdefault("printer", {})["enabled"] = True
+
+    CASE_TOOLS = {"start_case", "check_step", "uncheck_step", "case_status",
+                  "case_next", "case_note", "show_case", "case_report",
+                  "close_case", "list_cases"}
+
+    counts = {}
+    for on in (True, False):
+        cfg = copy.deepcopy(base)
+        cfg["casework"]["enabled"] = on
+        box = build_tools(cfg, Store(str(tmp / f"cw{on}.db")))
+        names = {x["name"] for x in box.schemas()}
+        counts[on] = names
+        label = "on" if on else "off"
+        check(f"casework {label}: case tools "
+              f"{'present' if on else 'gone'}",
+              bool(names & CASE_TOOLS) is on,
+              str(sorted(names & CASE_TOOLS)))
+        check(f"casework {label}: print_case "
+              f"{'offered' if on else 'withheld'}",
+              ("print_case" in names) is on)
+        check(f"casework {label}: the workout tools are there",
+              {"start_workout", "log_set", "finish_workout",
+               "list_workouts"} <= names)
+
+    check("turning it off removes eleven tools and nothing else",
+          counts[True] - counts[False] == CASE_TOOLS | {"print_case"},
+          str(sorted(counts[True] - counts[False])))
+    check("...and adds nothing", not counts[False] - counts[True])
+
+    # The part that actually matters: ticking off still works.
+    cfg = copy.deepcopy(base)
+    cfg["casework"]["enabled"] = False
+    store = Store(str(tmp / "live.db"))
+    box = build_tools(cfg, store)
+    said = box.workouts.run_sync("start_workout", {"name": "push"})
+    check("a session still starts", "Push Day" in said, said)
+    box.workouts.run_sync("log_set", {"exercise": "bench press",
+                                      "result": "185 for 5"})
+    case = store.case_active()
+    check("...and it is a case row underneath", case is not None)
+    rows = store.case_steps(case["id"])
+    done = [r for r in rows if r["done"]]
+    check("...and the step matcher still ticked it off",
+          len(done) == 1 and "Bench" in done[0]["text"],
+          str([r["text"] for r in done]))
+    check("...with what was lifted kept against it",
+          "185" in (done[0]["finding"] or ""), str(done[0]["finding"]))
+    box.workouts.run_sync("finish_workout", {})
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -345,6 +506,8 @@ def main() -> int:
         test_severity_is_not_assumed_to_be_text()
         test_router_word_boundaries()
         test_receipt_render()
+        test_printed_workout(tmp)
+        test_casework_off_keeps_workouts(tmp)
         test_key_resolution(tmp)
     print()
     if FAILURES:

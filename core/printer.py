@@ -149,7 +149,8 @@ _STYLES = {
 class PrinterTools:
     """print_list / print_case / print_note / print_text."""
 
-    def __init__(self, cfg: dict, store, timers=None, doctools=None):
+    def __init__(self, cfg: dict, store, timers=None, doctools=None,
+                 workouts=None):
         p = cfg.get("printer", {}) or {}
         self.enabled = bool(p.get("enabled", False))
         self.vendor = int(str(p.get("vendor_id", "0x04b8")), 16)
@@ -169,6 +170,20 @@ class PrinterTools:
         # not the one asked for.
         self.timers = timers
         self.docs = doctools
+        # Borrowed the same way the list resolver is: a printed session has
+        # to be the same file "start full body A" opens.
+        self.workouts = workouts
+        # A sheet you write on, or a sheet you read. Eleven exercises is
+        # eleven extra lines of dots — right for the garage, wasteful for a
+        # glance, and entirely a matter of taste. So it is a setting.
+        self.workout_write_lines = bool(p.get("workout_write_lines", True))
+        # print_case is only worth offering if there are cases to print.
+        # Workouts ride on the same tables, so the layout and the endpoint
+        # stay useful either way — but the TOOL should not be in the list
+        # when casework is off, or she has a tool for something she has been
+        # told she cannot do.
+        self.cases_on = bool(
+            (cfg.get("casework", {}) or {}).get("enabled", False))
         if self.enabled:
             log.info("printer: %04x:%04x out=%s in=%s width=%d",
                      self.vendor, self.product, hex(self.out_ep),
@@ -302,9 +317,125 @@ class PrinterTools:
             r.rule()
         return r
 
+    def build_workout(self, title: str, steps: list[dict],
+                      subtitle: str = "", write_lines: bool = True,
+                      default_rest: int = 90) -> Receipt:
+        """A session as a sheet you can take to the garage and write on.
+
+        Different from build_case on purpose. A case wants the record; a
+        workout sheet wants room for a pencil, because the whole reason to
+        print one is that your hands are chalked and the screen is across the
+        room. Rest is printed only where it differs from the default, with
+        the default in the footer — otherwise the same number repeats down
+        every line and buys nothing.
+        """
+        r = Receipt(self.width)
+        self._open(r, title, subtitle)
+        phase = None
+        for step in steps:
+            if step.get("phase") and step["phase"] != phase:
+                phase = step["phase"]
+                r.blank().raw(phase.upper(), "bold")
+            r.wrap(step.get("text", ""), indent="[ ] ", hang="    ")
+            rest = int(step.get("rest") or 0)
+            if rest and rest != default_rest:
+                m, sec = divmod(rest, 60)
+                r.raw(f"      rest {m}:{sec:02d}" if m else f"      rest {rest}s")
+            if write_lines:
+                r.raw("      " + "." * max(8, self.width - 6))
+        r.rule()
+        n = len(steps)
+        r.columns(f"{n} exercise{'s' if n != 1 else ''}",
+                  f"rest {default_rest}s unless noted")
+        return r
+
+    def build_schedule(self, rows: list[tuple[str, str, object]],
+                       say_date=None) -> Receipt:
+        """What is coming up, dated first. The fridge-door version."""
+        r = Receipt(self.width)
+        self._open(r, "workouts")
+        today = time.strftime("%Y-%m-%d")
+        dated = [row for row in rows if row[0]]
+        loose = [row for row in rows if not row[0]]
+        if dated:
+            for iso, label, _path in dated:
+                when = iso
+                try:
+                    stamp = time.strptime(iso, "%Y-%m-%d")
+                    when = time.strftime("%a %d %b", stamp)
+                except ValueError:
+                    pass
+                mark = "  " if iso >= today else "x "
+                r.columns(mark + when, label)
+            r.rule()
+        if loose:
+            r.raw("ANY TIME", "bold")
+            for _iso, label, _path in loose:
+                r.wrap(label, indent="  ", hang="    ")
+            r.rule()
+        if not dated and not loose:
+            r.blank().centre("no workout files").blank().rule()
+        upcoming = sum(1 for iso, _l, _p in dated if iso >= today)
+        r.centre(f"{upcoming} still to come" if upcoming
+                 else f"{len(rows)} file{'s' if len(rows) != 1 else ''}")
+        return r
+
     # -- tool surface ------------------------------------------------
 
-    _NAMES = {"print_list", "print_case", "print_note", "print_text"}
+    _NAMES = {"print_list", "print_case", "print_note", "print_text",
+              "print_workout"}
+
+    def build_selfcheck(self, report, only: str = "all"):
+        """A dated systems-check slip.
+
+        Printing this has a property no other output has: the receipt existing
+        at all is proof the printer works. Every other check in the report is
+        an assertion about hardware; this one is the hardware agreeing.
+
+        `only`: "all" prints every check, "problems" only what is wrong. The
+        daily run uses "problems" — a slip that says thirty things are fine is
+        a slip you stop reading, and a roll of paper you stop replacing.
+        """
+        from .selfcheck import FAIL, GROUPS, OK, SKIP, WARN
+        MARK = {OK: "[ok]", WARN: "[!!]", FAIL: "[XX]", SKIP: "[--]"}
+
+        r = Receipt(width=self.width)
+        counts = report.counts()
+        headline = ("ALL CLEAR" if report.healthy else
+                    f"{counts[FAIL]} FAILED" if counts[FAIL] else
+                    f"{counts[WARN]} WARNING"
+                    + ("S" if counts[WARN] != 1 else ""))
+        self._open(r, "SYSTEMS CHECK", headline)
+
+        wanted = ([c for c in report.checks if c.status in (FAIL, WARN)]
+                  if only == "problems" else report.checks)
+        for group in GROUPS:
+            rows = [c for c in wanted if c.group == group]
+            if not rows:
+                continue
+            r.raw("")
+            r.raw(group.upper(), style="head")
+            for c in rows:
+                mark = MARK.get(c.status, "[??]")
+                # Mark on the right, like a till receipt's price column, so the
+                # eye runs down one edge looking for anything that is not [ok].
+                r.columns(c.name[:self.width - len(mark) - 2], mark)
+                if c.status in (FAIL, WARN):
+                    if c.detail:
+                        r.wrap(c.detail, indent="    ")
+                    if c.fix:
+                        r.wrap("-> " + c.fix, indent="    ", hang="       ")
+
+        r.raw("")
+        r.rule()
+        r.columns("checks", str(len(report.checks)))
+        r.columns("ok / warn / fail",
+                  f"{counts[OK]} / {counts[WARN]} / {counts[FAIL]}")
+        r.columns("took", f"{report.seconds:.0f}s")
+        if report.healthy:
+            r.raw("")
+            r.centre("Nothing needs you.")
+        return r
 
     def schemas(self) -> list[dict]:
         if not self.enabled:
@@ -333,7 +464,7 @@ class PrinterTools:
                     },
                 },
             },
-            {
+            *([{
                 "name": "print_case",
                 "description": (
                     "Print the active investigation on paper. Use when they "
@@ -352,6 +483,43 @@ class PrinterTools:
                                 "left, which is what 'print what I still have "
                                 "to do' means. 'findings' is only the steps "
                                 "with findings recorded, for writing a report."
+                            ),
+                        },
+                    },
+                },
+            }] if self.cases_on else []),
+            {
+                "name": "print_workout",
+                "description": (
+                    "Print a training session on paper — the exercises with "
+                    "boxes to tick and room to write. Use for 'print my "
+                    "workout', 'print full body A', 'put today's session on "
+                    "paper'. With no `name` this is today's session, or the "
+                    "next one if today is a rest day. Set what='schedule' "
+                    "for 'print my workouts', 'what have I got this week', "
+                    "'print the list of workouts' — that prints the "
+                    "programme rather than one session. Say one short "
+                    "sentence; do not read the exercises back, the paper is "
+                    "the point."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Part of the session name, if they named one "
+                                "— 'full body A', 'conditioning'. Omit for "
+                                "today's."
+                            ),
+                        },
+                        "what": {
+                            "type": "string",
+                            "enum": ["session", "schedule"],
+                            "description": (
+                                "'session' is one workout's exercises, which "
+                                "is the default. 'schedule' is the list of "
+                                "what is coming up."
                             ),
                         },
                     },
@@ -408,6 +576,8 @@ class PrinterTools:
                            f"{spoken}.")
 
         if name == "print_case":
+            if not self.cases_on:
+                return "Casework is turned off."
             case = self.store.case_active()
             if not case:
                 return "No case is open."
@@ -425,6 +595,9 @@ class PrinterTools:
             if only == "findings":
                 return "Printed the findings."
             return f"Printed. {done} of {total} ticked off."
+
+        if name == "print_workout":
+            return self._print_workout(args)
 
         if name == "print_note":
             if self.docs is None or not self.docs.enabled:
@@ -448,3 +621,53 @@ class PrinterTools:
             r.wrap(line, hang="  ") if line.strip() else r.blank()
         err = self._send(r)
         return err or "Printed."
+
+    def _print_workout(self, args: dict) -> str:
+        """One session, or the programme.
+
+        Resolution order is deliberate and matches what gets said out loud:
+        a name he gave wins; otherwise today's dated session; otherwise the
+        next one, because "print my workout" on a rest day means he is
+        getting ready for tomorrow, not asking whether today counts.
+        """
+        if self.workouts is None or not self.workouts.enabled:
+            return "Workouts are turned off in the configuration."
+
+        if (args.get("what") or "session") == "schedule":
+            rows = self.workouts.schedule()
+            if not rows:
+                return "There are no workout files to print."
+            err = self._send(self.build_schedule(rows))
+            return err or f"Printed. {len(rows)} sessions."
+
+        wanted = (args.get("name") or "").strip()
+        path, why = self.workouts.resolve(wanted or None)
+        note = ""
+        if path is None and not wanted:
+            path = self.workouts.next_up() or self.workouts.newest()
+            if path is not None:
+                note = " That is the next one — nothing is scheduled today."
+        if path is None:
+            if wanted:
+                have = ", ".join(
+                    label for _iso, label, _p in self.workouts.schedule()[:5])
+                return (f"I have no workout called {wanted!r}. "
+                        f"I have: {have}." if have
+                        else "There are no workout files.")
+            return why or "There are no workout files."
+
+        try:
+            title, steps = self.workouts.read(path)
+        except Exception as exc:  # noqa: BLE001
+            return f"Could not read that workout: {type(exc).__name__}."
+        if not steps:
+            return f"{title} has nothing in it to print."
+
+        err = self._send(self.build_workout(
+            title, steps,
+            write_lines=self.workout_write_lines,
+            default_rest=getattr(self.workouts, "default_rest", 90)))
+        if err:
+            return err
+        n = len(steps)
+        return f"Printed {title}. {n} exercise{'s' if n != 1 else ''}.{note}"

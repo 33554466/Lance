@@ -297,6 +297,11 @@ def ensure_capture_works(cfg: dict) -> bool:
     return False
 
 
+# How often to tell the orchestrator the microphone is still delivering
+# frames. Ten seconds is frequent enough that a self check always has a fresh
+# number, and rare enough to be invisible.
+HEARTBEAT_SECONDS = 10.0
+
 _PUNCT = str.maketrans("", "", ".,!?;:\"'’")
 
 
@@ -612,9 +617,29 @@ class AudioService:
                  self.cfg["wake_word"]["model"],
                  self.cfg["wake_word"]["threshold"])
         self.send({"type": "state", "state": "idle"})
+        next_beat = 0.0
 
         while True:
             try:
+                # --- heartbeat ------------------------------------------
+                # Tell the orchestrator how long ago the last audio frame
+                # arrived. This process holds the sound device exclusively, so
+                # it is the ONLY thing that can answer "is the microphone
+                # actually delivering audio" — nothing else can open it to
+                # look. Without this, a self check can confirm the array is on
+                # the USB bus and still not know whether it is hearing
+                # anything, which is exactly the wedge that cost two days.
+                now = time.time()
+                if now >= next_beat:
+                    next_beat = now + HEARTBEAT_SECONDS
+                    self.send({
+                        "type": "heartbeat",
+                        "frame_age": now - self.listener.last_frame_ts,
+                        "wake_model": self.cfg["wake_word"]["model"],
+                        "threshold": self.cfg["wake_word"]["threshold"],
+                        "speaking": self.speaker.is_speaking,
+                    })
+
                 # --- microphone stall watchdog ---------------------------
                 # Exit rather than sit here deaf. systemd restarts us, and
                 # ensure_capture_works() then waits patiently for the device

@@ -26,6 +26,9 @@ from .db import Store
 from .provider import Reply, build_provider, web_search_tool
 from .router import Router
 from .scheduler import Scheduler
+from .selfcheck import SelfCheck
+from .intervals import IntervalRunner
+from .monitor import Monitor
 from .tools import build_tools
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +54,10 @@ SHOWS_CASE = frozenset({
 })
 SHOWS_NOTHING = frozenset({"close_case", "finish_workout"})
 
+# The interval timer draws its own screen from the scheduler tick, and it must
+# not be shoved aside by a checklist redraw the moment it starts.
+TAKES_SCREEN_TIMER = frozenset({"start_interval_timer"})
+
 # Playing a video takes the whole screen for itself. Redrawing the checklist
 # underneath it would be invisible now and wrong later, when mpv quits and the
 # dashboard comes back showing a case nobody is working on.
@@ -68,6 +75,8 @@ class Hub:
     def __init__(self) -> None:
         self.audio: set[WebSocket] = set()
         self.display: set[WebSocket] = set()
+        # Set at startup so worker threads can hand a send back to the loop.
+        self.loop: asyncio.AbstractEventLoop | None = None
 
     async def _send(self, targets: set[WebSocket], payload: dict) -> None:
         dead = []
@@ -84,6 +93,22 @@ class Hub:
 
     async def to_display(self, payload: dict) -> None:
         await self._send(self.display, payload)
+
+    def push(self, payload: dict) -> None:
+        """Send to the screen from a worker thread.
+
+        Tools run under asyncio.to_thread, so they cannot await. This hands
+        the send back to the event loop instead of reaching into a websocket
+        from the wrong thread. A no-op before startup has set the loop, which
+        is what every test gets.
+        """
+        loop = getattr(self, "loop", None)
+        if loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self.to_display(payload), loop)
+
+    def push_selfcheck(self, report) -> None:
+        self.push({"type": "selfcheck", **report.as_dict()})
 
     async def broadcast_state(self, state: str, detail: str = "") -> None:
         payload = {"type": "state", "state": state, "detail": detail}
@@ -109,6 +134,25 @@ scheduler = Scheduler(store, hub, cfg)
 # The sweep lives on the toolbox (it needs the same clock the memory tools
 # use) and runs on the scheduler's tick. One clock, one definition of stale.
 scheduler.sweep = local_tools.sweep
+# The diagnostic needs the store (state), the toolbox (peripherals, models) and
+# the hub (who is connected). It is built here rather than inside the toolbox
+# because it has to see the hub, and the toolbox deliberately cannot.
+selfcheck = SelfCheck(cfg, store, tools=local_tools, hub=hub)
+local_tools.attach_selfcheck(selfcheck, hub=hub)
+scheduler.selfcheck = selfcheck
+# So the daily run can print. The scheduler reaches for tools.printer only
+# when it has something worth putting on paper.
+scheduler.tools = local_tools
+# The interval timer speaks and draws, so it needs the hub; it is ticked by the
+# scheduler, which is already the one thing running once a second.
+# The status wall runs the SAME probes as the daily diagnostic, on a rolling
+# schedule instead of all at once. It is built from the checker rather than
+# beside it, so the two can never disagree about what "the printer" means.
+monitor = Monitor(selfcheck, cfg)
+scheduler.monitor = monitor
+intervals = IntervalRunner(cfg, store, hub=hub)
+local_tools.attach_intervals(intervals)
+scheduler.intervals = intervals
 # Same reasoning for media: it needs a heartbeat to notice a video that ended
 # on its own, and to lift a duck that was never lifted. One tick, two owners.
 scheduler.media = local_tools.media
@@ -198,6 +242,7 @@ async def _startup():
     # Timers must survive a restart, so the scheduler reloads pending items
     # from SQLite rather than holding them in memory. Starting it here means
     # a reminder set before an update still fires after it.
+    hub.loop = asyncio.get_running_loop()
     scheduler.start()
     asyncio.create_task(_backfill_loop())
 
@@ -238,6 +283,42 @@ async def wake_stats(hours: int = 24):
         s["score_median"] = round(scores[len(scores) // 2], 3)
         s["score_max"] = round(scores[-1], 3)
     return JSONResponse(s)
+
+
+@app.get("/status.json")
+async def status_json():
+    """The rolling status of everything, as data.
+
+    Polled by the wall every couple of seconds. Reading it costs nothing —
+    the probes run on the scheduler's tick, not on the request, so a browser
+    left open all day does not make the appliance do any extra work.
+    """
+    return JSONResponse(monitor.snapshot())
+
+
+@app.get("/status")
+async def status_page():
+    """The wall itself. A page you can leave up on anything."""
+    return FileResponse(ROOT / "ui" / "status.html")
+
+
+@app.get("/selfcheck")
+async def selfcheck_endpoint(run: int = 0, quick: int = 0):
+    """The last report, or a fresh one with ?run=1.
+
+    Reading is free; running costs a few seconds and — unless quick=1 — about a
+    cent, because proving the API key and the search tool work means actually
+    using them. So a plain GET never runs anything: the dashboard polls this,
+    and a dashboard that spent a cent every fifteen seconds would be a
+    remarkable way to lose money.
+    """
+    if run:
+        report = await asyncio.to_thread(selfcheck.run, not quick)
+        return JSONResponse(report.as_dict())
+    if selfcheck.last is None:
+        return JSONResponse({"ran": False,
+                             "hint": "GET /selfcheck?run=1 to run one"})
+    return JSONResponse(selfcheck.last.as_dict())
 
 
 @app.get("/reminders")
@@ -525,6 +606,13 @@ async def ws_audio(ws: WebSocket):
                 _cancel.set()
                 await hub.to_display({"type": "cancelled"})
 
+            elif kind == "heartbeat":
+                # The only honest source for "is the microphone hearing
+                # anything". The audio service owns the device; nothing else
+                # can open it to check.
+                selfcheck.mic_frame_age = float(msg.get("frame_age", 0.0))
+                selfcheck.mic_reported_at = time.time()
+
             elif kind == "barge_in":
                 log.info("barge-in")
                 await hub.to_display({"type": "barge_in"})
@@ -736,7 +824,8 @@ async def handle_utterance(text: str, mode: str | None = None) -> None:
             # step off and not seeing it go grey is the kind of small silence
             # that makes you stop trusting the screen.
             if (SHOWS_CASE.intersection(reply.tool_calls)
-                    and not TAKES_SCREEN.intersection(reply.tool_calls)):
+                    and not TAKES_SCREEN.intersection(reply.tool_calls)
+                    and not TAKES_SCREEN_TIMER.intersection(reply.tool_calls)):
                 await hub.to_display({"type": "show_case"})
             if SHOWS_NOTHING.intersection(reply.tool_calls):
                 await hub.to_display({"type": "hide_case"})

@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lance — status</title>
+<!--
+  The status wall. Standalone on purpose: no shared stylesheet, no build
+  step, nothing to keep in step with the kiosk page. Leave it open on a
+  phone, a laptop, or a spare monitor and it stays honest.
+
+  It polls; it does not hold a socket. A wall that silently stops updating
+  because a websocket died in the night is the exact failure it exists to
+  catch, and a dropped poll is visible in the header within four seconds.
+-->
+<style>
+  :root {
+    --bg:#0b0d10; --panel:#11151a; --line:#232a33;
+    --text:#e6edf3; --dim:#7d8590;
+    --ok:#3fb950; --warn:#d29922; --fail:#f85149; --skip:#484f58;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+         Roboto, Helvetica, Arial, sans-serif;
+    padding: 16px;
+  }
+  header {
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    padding-bottom:12px; border-bottom:1px solid var(--line);
+  }
+  #verdict {
+    display:flex; align-items:center; gap:10px;
+    font-size:1.7rem; font-weight:600; letter-spacing:-0.01em;
+  }
+  #bigdot { width:18px; height:18px; border-radius:50%; background:var(--skip); }
+  .ok   #bigdot { background:var(--ok);   box-shadow:0 0 14px var(--ok); }
+  .warn #bigdot { background:var(--warn); box-shadow:0 0 14px var(--warn); }
+  .fail #bigdot { background:var(--fail); box-shadow:0 0 14px var(--fail); }
+  #tally { display:flex; gap:12px; color:var(--dim); font-size:0.95rem;
+           font-variant-numeric:tabular-nums; }
+  #tally b { color:var(--text); font-weight:600; }
+  #spacer { margin-left:auto; }
+  #polled { color:var(--dim); font-size:0.9rem; font-variant-numeric:tabular-nums; }
+  #polled.stale { color:var(--fail); }
+
+  /* Problems first, always. Twenty-four greens must never make you hunt
+     for the one red — that is the whole job of this page. */
+  #problems { margin:14px 0 0; display:grid; gap:8px; }
+  .prob {
+    background:var(--panel); border:1px solid var(--line);
+    border-left:4px solid var(--fail); border-radius:8px; padding:10px 12px;
+  }
+  .prob.warn { border-left-color:var(--warn); }
+  .prob .head { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .prob .nm { font-weight:600; }
+  .prob .gp { color:var(--dim); font-size:0.85rem; }
+  .prob .dt { color:var(--text); opacity:0.85; }
+  .prob .fx { color:var(--warn); font-size:0.92rem; margin-top:5px; }
+
+  #groups {
+    margin-top:16px;
+    display:grid; gap:14px;
+    grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));
+  }
+  .group {
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px 12px;
+  }
+  .group h2 {
+    margin:0 0 8px; font-size:0.78rem; letter-spacing:0.09em;
+    text-transform:uppercase; color:var(--dim); font-weight:600;
+  }
+  .row { display:flex; align-items:baseline; gap:9px; padding:3px 0; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto;
+         background:var(--skip); position:relative; top:-1px; }
+  .row.ok   .dot { background:var(--ok); }
+  .row.warn .dot { background:var(--warn); }
+  .row.fail .dot { background:var(--fail); }
+  .row .nm { flex:0 0 auto; }
+  .row .dt { color:var(--dim); font-size:0.88rem;
+             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .age { margin-left:auto; color:var(--skip); font-size:0.78rem;
+              font-variant-numeric:tabular-nums; flex:0 0 auto; }
+  /* A reading older than three times its own interval is not a status, it
+     is a memory. Say so rather than showing a confident green dot. */
+  .row .age.old { color:var(--warn); }
+  footer { margin-top:16px; color:var(--skip); font-size:0.82rem; }
+  @media (max-width:480px) { body { padding:10px; } #verdict { font-size:1.35rem; } }
+</style>
+
+<header>
+  <div id="verdict"><span id="bigdot"></span><span id="word">connecting…</span></div>
+  <div id="tally"></div>
+  <div id="spacer"></div>
+  <div id="polled">—</div>
+</header>
+
+<div id="problems"></div>
+<div id="groups"></div>
+<footer id="foot"></footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const WORDS = { ok:"All well", warn:"Needs a look", fail:"Something is wrong",
+                  skip:"Starting up" };
+  let lastOk = 0;
+
+  function ago(s) {
+    if (s === null || s === undefined) return "never";
+    if (s < 60) return Math.round(s) + "s";
+    if (s < 3600) return Math.round(s / 60) + "m";
+    return (s / 3600).toFixed(1) + "h";
+  }
+
+  function render(d) {
+    document.body.className = d.verdict;
+    $("word").textContent = WORDS[d.verdict] || d.verdict;
+    const c = d.counts;
+    $("tally").innerHTML =
+      `<span><b>${c.ok}</b> ok</span><span><b>${c.warn}</b> warn</span>` +
+      `<span><b>${c.fail}</b> failing</span><span><b>${c.skip}</b> skipped</span>`;
+
+    const probs = $("problems");
+    probs.textContent = "";
+    d.problems.forEach(p => {
+      const box = document.createElement("div");
+      box.className = "prob " + p.status;
+      const head = document.createElement("div");
+      head.className = "head";
+      const nm = document.createElement("span"); nm.className = "nm";
+      nm.textContent = p.name;
+      const gp = document.createElement("span"); gp.className = "gp";
+      gp.textContent = p.group;
+      const dt = document.createElement("span"); dt.className = "dt";
+      dt.textContent = p.detail || "";
+      head.append(nm, gp, dt);
+      box.appendChild(head);
+      if (p.fix) {
+        const fx = document.createElement("div");
+        fx.className = "fx"; fx.textContent = p.fix;
+        box.appendChild(fx);
+      }
+      probs.appendChild(box);
+    });
+
+    const wrap = $("groups");
+    wrap.textContent = "";
+    d.groups.forEach(g => {
+      const rows = d.checks.filter(x => x.group === g);
+      if (!rows.length) return;
+      const box = document.createElement("div");
+      box.className = "group";
+      const h = document.createElement("h2"); h.textContent = g;
+      box.appendChild(h);
+      rows.forEach(r => {
+        const row = document.createElement("div");
+        row.className = "row " + r.status;
+        const dot = document.createElement("span"); dot.className = "dot";
+        const nm = document.createElement("span"); nm.className = "nm";
+        nm.textContent = r.name;
+        const dt = document.createElement("span"); dt.className = "dt";
+        dt.textContent = r.detail || "";
+        const age = document.createElement("span"); age.className = "age";
+        age.textContent = ago(r.age);
+        if (r.age !== null && r.every && r.age > r.every * 3) {
+          age.classList.add("old");
+        }
+        age.title = `${r.tier} tier — re-read every ${ago(r.every)}`;
+        row.append(dot, nm, dt, age);
+        box.appendChild(row);
+      });
+      wrap.appendChild(box);
+    });
+
+    $("foot").textContent =
+      `${d.checks.length} checks · fast 5s, medium 1m, slow 15m, paid 6h · ` +
+      `orchestrator up ${ago(d.uptime)}`;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/status.json", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      render(await r.json());
+      lastOk = Date.now();
+      $("polled").textContent = "live";
+      $("polled").classList.remove("stale");
+    } catch (err) {
+      // Do NOT blank the page. The last known state plus a loud "stale" is
+      // far more use than an empty screen, and the whole point of this page
+      // is the moment the orchestrator has stopped answering.
+      const secs = lastOk ? Math.round((Date.now() - lastOk) / 1000) : null;
+      $("polled").textContent = lastOk
+        ? `no answer for ${secs}s` : "cannot reach the orchestrator";
+      $("polled").classList.add("stale");
+      if (!lastOk) {
+        document.body.className = "fail";
+        $("word").textContent = "Orchestrator not answering";
+      }
+    }
+  }
+
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>

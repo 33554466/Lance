@@ -87,6 +87,18 @@ class Scheduler:
         self.sla = Sla(cfg)
         self.sweep = None      # set by app.py, which owns the toolbox
         self.media = None      # likewise — needs a heartbeat, not a thread
+        self.selfcheck = None  # the daily diagnostic, also set by app.py
+        self.intervals = None  # the exercise interval timer, ditto
+        self.monitor = None    # the rolling status wall, also from app.py
+        sc = (cfg.get("selfcheck", {}) or {})
+        self.check_enabled = bool(sc.get("enabled", True))
+        self.check_daily = bool(sc.get("daily", True))
+        self.check_hour = int(sc.get("daily_hour", 7))
+        self.check_announce_ok = bool(sc.get("announce_when_healthy", False))
+        self.check_print = bool(sc.get("print_daily", True))
+        self.check_print_all = bool(sc.get("print_everything", False))
+        self._check_last_day: str | None = None
+        self._check_running = False
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -114,6 +126,99 @@ class Scheduler:
             await self._sla_tick()
         self._sweep_tick()
         self._media_tick()
+        await self._interval_tick()
+        await self._selfcheck_tick()
+        await self._monitor_tick()
+
+    async def _monitor_tick(self) -> None:
+        """Let the status wall re-read whatever has gone stale.
+
+        It decides what is due; this only has to call it once a second and
+        never let it take the loop down with it.
+        """
+        if self.monitor is None:
+            return
+        try:
+            await self.monitor.tick()
+        except Exception:  # noqa: BLE001
+            log.exception("monitor tick failed — continuing")
+
+    async def _interval_tick(self) -> None:
+        """Drive the exercise timer.
+
+        It lives here rather than owning a task of its own for the same reason
+        the reminders do: a sleeping task is a task that quietly disappears
+        when anything goes wrong, and this is the one feature where being
+        eight seconds late is the whole failure. The runner computes its own
+        position from a start time, so a tick that arrives late corrects
+        itself rather than drifting.
+        """
+        runner = getattr(self, "intervals", None)
+        if runner is None or not runner.running:
+            return
+        try:
+            await runner.tick()
+        except Exception:  # noqa: BLE001
+            log.exception("interval tick failed — stopping the timer")
+            try:
+                runner.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _selfcheck_tick(self) -> None:
+        """Once a day, check everything. Speak only if something is wrong.
+
+        Silence is the design, not an oversight. A daily report that says "all
+        thirty checks passed" is a report you stop hearing inside a week, and
+        then the one that matters goes past you with it. The printed slip is
+        the exception — it is a physical artefact you can glance at, and its
+        existence is itself proof the printer still works.
+
+        Keyed on the local date rather than an interval, so a restart does not
+        re-run it and a machine that was off all morning still gets its check
+        when it comes back.
+        """
+        checker = getattr(self, "selfcheck", None)
+        if (checker is None or not self.check_enabled or not self.check_daily
+                or self._check_running):
+            return
+        now = _dt.datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if self._check_last_day == today or now.hour < self.check_hour:
+            return
+        self._check_last_day = today
+        self._check_running = True
+        try:
+            log.info("running the daily self check")
+            report = await asyncio.to_thread(checker.run, True)
+            await self.hub.to_display({"type": "selfcheck",
+                                       **report.as_dict()})
+
+            if self.check_print:
+                printer = getattr(getattr(self, "tools", None), "printer", None)
+                if printer is not None and printer.enabled:
+                    only = "all" if self.check_print_all else "problems"
+                    if not report.healthy or self.check_print_all:
+                        try:
+                            await asyncio.to_thread(
+                                printer._send,
+                                printer.build_selfcheck(report, only=only))
+                        except Exception:  # noqa: BLE001
+                            log.exception("could not print the daily check")
+
+            if report.healthy and not self.check_announce_ok:
+                log.info("daily self check: all clear, saying nothing")
+                return
+            said = report.spoken()
+            log.info("daily self check: %s", said)
+            if self.chime:
+                await self.hub.to_audio({"type": "chime", "kind": "alert"})
+            await self.hub.to_audio({"type": "speak", "text": said})
+            await self.hub.to_audio({"type": "speak_done"})
+        except Exception:  # noqa: BLE001
+            log.exception("the daily self check failed — continuing")
+        finally:
+            self._check_running = False
 
     def _media_tick(self) -> None:
         """Notice a video that ended, and rescue a volume that never came back.

@@ -167,6 +167,50 @@ class WorkoutTools:
         m = _DATE.search(path.name)
         return m.group(0) if m else None
 
+    # -- what other tools are allowed to ask for ---------------------
+    # The printer needs to resolve a spoken name to a file and read it, and
+    # it must land on exactly the same file "start full body A" would. Two
+    # resolvers would drift, and a printed sheet that is real but not the
+    # session on the screen is worse than no sheet.
+
+    def resolve(self, name: str | None = None) -> tuple[Path | None, str]:
+        """(file, why) for a spoken name, or for today when none is given."""
+        return self._pick(name)
+
+    def next_up(self) -> Path | None:
+        """The next dated session after today, if a programme is installed."""
+        today = time.strftime("%Y-%m-%d")
+        ahead = sorted((p for p in self._files()
+                        if (self._dated(p) or "") > today),
+                       key=lambda p: (self._dated(p) or "", p.name))
+        return ahead[0] if ahead else None
+
+    def newest(self) -> Path | None:
+        files = self._files()
+        return files[0] if files else None
+
+    def read(self, path: Path) -> tuple[str, list[dict]]:
+        """(title, steps) for a file, with the filename as the fallback
+        title — the same fallback the session on screen uses."""
+        title, steps = parse(path.read_text(), self.default_rest)
+        if title == "Workout":
+            title = self._label(path).title() or "Workout"
+        return title, steps
+
+    def schedule(self) -> list[tuple[str, str, Path]]:
+        """(date or '', spoken label, path) — dated first, in date order."""
+        rows = [((self._dated(p) or ""), self._label(p), p)
+                for p in self._files()]
+        dated = sorted((r for r in rows if r[0]), key=lambda r: (r[0], r[2].name))
+        loose = sorted((r for r in rows if not r[0]), key=lambda r: r[1])
+        return dated + loose
+
+    def spoken_label(self, path: Path) -> str:
+        return self._label(path)
+
+    def say_date(self, iso: str) -> str:
+        return self._say_date(iso)
+
     def _pick(self, name: str | None) -> tuple[Path | None, str]:
         """(file, why). `why` is '' on a clean hit, or a sentence to say.
 

@@ -282,6 +282,113 @@
   .state-error        #dot { background: var(--error); }
   .state-offline      #dot { background: var(--error); }
 
+  /* ---------- the status wall ----------
+     The appliance's monitor is pinned to the board, so there is no idle
+     clock to replace — this sits under it instead, always there, and stays
+     one quiet line while everything is well. It grows only when it has
+     something to say, which is the only way a permanent status display
+     survives being in a room you live in.
+
+     z-index 30 puts it under the systems check (40) and the timer (60):
+     those take the whole screen on purpose and the wall has no business
+     fighting them. It polls /status.json, which is a cached read — the
+     probes run on the orchestrator's own tick, so a screen left up all day
+     costs nothing. */
+  #wall {
+    position: fixed; left: 0; right: 0; bottom: 4.6rem; z-index: 30;
+    display: none; flex-direction: column; gap: 0.35rem;
+    padding: 0.7rem 1.4rem;
+    background: rgba(13, 17, 23, 0.86);
+    border-top: 1px solid #21262d;
+    backdrop-filter: blur(6px);
+    font-size: 1rem;
+  }
+  #wall.on { display: flex; }
+  #wall-line { display: flex; align-items: center; gap: 1.1rem;
+               flex-wrap: wrap; }
+  #wall-dot { width: 12px; height: 12px; border-radius: 50%;
+              background: var(--dim); flex-shrink: 0; }
+  #wall.ok   #wall-dot { background: var(--live); }
+  #wall.warn #wall-dot { background: var(--think);
+                         box-shadow: 0 0 10px var(--think); }
+  #wall.fail #wall-dot { background: var(--error);
+                         box-shadow: 0 0 10px var(--error); }
+  #wall-word { font-weight: 600; letter-spacing: 0.01em; }
+  #wall.ok #wall-word { color: var(--dim); font-weight: 400; }
+  #wall-groups { display: flex; gap: 1rem; flex-wrap: wrap;
+                 color: var(--dim); font-size: 0.92rem; }
+  #wall-groups .g { display: flex; align-items: center; gap: 0.35rem; }
+  #wall-groups .g i { width: 8px; height: 8px; border-radius: 50%;
+                      background: var(--live); display: inline-block;
+                      font-style: normal; }
+  #wall-groups .g.warn i { background: var(--think); }
+  #wall-groups .g.fail i { background: var(--error); }
+  #wall-groups .g.skip i { background: #484f58; }
+  #wall-age { margin-left: auto; color: #484f58; font-size: 0.82rem;
+              font-variant-numeric: tabular-nums; }
+  #wall-age.stale { color: var(--error); }
+  /* Problems, with the fix, because a status line that says "printer: fail"
+     and stops has turned a known problem into a mystery. */
+  #wall-bad { display: flex; flex-direction: column; gap: 0.3rem; }
+  #wall-bad .b { display: flex; gap: 0.6rem; align-items: baseline;
+                 font-size: 0.95rem; }
+  #wall-bad .b .n { font-weight: 600; flex-shrink: 0; }
+  #wall-bad .b .d { color: var(--dim); }
+  #wall-bad .b .f { color: var(--think); }
+
+  /* ---------- the always-on status pill ----------
+     The bar at the bottom says the same thing, but every full-bleed panel
+     covers it — the timer, the systems check, the case overlay — and those
+     are exactly the moments you are across the room wondering whether she
+     heard you. So: one small thing, fixed to the top right, above
+     everything, never hidden by a panel.
+
+     z-index 100 puts it over the timer (60) and the check (40). It is
+     deliberately small and low-contrast when idle: a status light you
+     notice only when it changes is doing its job. */
+  #pill {
+    position: fixed; top: 1.4vh; right: 1.4vw; z-index: 100;
+    display: flex; align-items: center; gap: 0.55rem;
+    padding: 0.5rem 0.95rem 0.5rem 0.8rem; border-radius: 999px;
+    background: rgba(13, 17, 23, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    backdrop-filter: blur(8px);
+    font-size: 1.05rem; letter-spacing: 0.01em; line-height: 1;
+    color: var(--text); opacity: 0.55;
+    transition: opacity 0.25s ease, border-color 0.25s ease;
+    pointer-events: none; user-select: none;
+  }
+  /* Anything that is not "ready" is worth reading, so it comes forward. */
+  body:not(.state-idle) #pill { opacity: 1; }
+
+  #pill-dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--dim); flex-shrink: 0;
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  .state-idle         #pill-dot { background: var(--dim); }
+  .state-listening    #pill-dot,
+  .state-transcribing #pill-dot { background: var(--live);
+                                  box-shadow: 0 0 10px var(--live); }
+  .state-thinking     #pill-dot { background: var(--think);
+                                  box-shadow: 0 0 10px var(--think); }
+  .state-speaking     #pill-dot { background: var(--speak);
+                                  box-shadow: 0 0 10px var(--speak); }
+  .state-error        #pill-dot,
+  .state-offline      #pill-dot { background: var(--error);
+                                  box-shadow: 0 0 10px var(--error); }
+  /* Offline is the one state that should be impossible to miss or mistake
+     for a passing mood — nothing is going to answer until it clears. */
+  .state-offline #pill { opacity: 1;
+                         border-color: rgba(240, 115, 111, 0.55); }
+
+  /* The timer paints the whole screen, so the pill needs its own ground to
+     stay legible on green and on amber. */
+  #timer.on ~ #pill, #check.on ~ #pill {
+    background: rgba(0, 0, 0, 0.55);
+    border-color: rgba(255, 255, 255, 0.16);
+  }
+
   /* ---------- typed fallback ---------- */
   #typed {
     position: fixed; left: 50%; bottom: 7rem; transform: translateX(-50%);
@@ -296,6 +403,147 @@
      few seconds of stillness. Always-hidden looks right on the finished
      appliance and is maddening while you are testing in a browser tab. */
   body.hide-cursor, body.hide-cursor * { cursor: none; }
+
+  /* ---------- systems check ----------------------------------------
+     Same shape as the case overlay: full bleed, its own header strip, and
+     a footer that carries one line of context. Laid out in columns by
+     group so twenty-six rows fit without scrolling — a check you have to
+     scroll is a check whose worst item you might not see. */
+  #check {
+    position: fixed; inset: 0; display: none;
+    flex-direction: column; background: var(--bg, #0b0d10);
+    padding: 2.2vh 2.4vw; z-index: 40;
+  }
+  #check.on { display: flex; }
+  /* The status pill is fixed to the top right above everything, so the
+     panel's own header has to get out from under it. Only when resting:
+     a one-off report is dismissed in a few seconds and the overlap does
+     not matter, but this one is on screen all day. */
+  #check.resting #check-head { padding-right: 13rem; }
+  #check-head {
+    display: flex; align-items: center; gap: 0.8rem;
+    padding-bottom: 1.1vh; border-bottom: 1px solid rgba(255,255,255,0.12);
+  }
+  #check-title { font-size: 2rem; font-weight: 600; letter-spacing: -0.01em; }
+  #check-spacer { flex: 1; }
+  #check-when { font-size: 1.1rem; opacity: 0.55; font-variant-numeric: tabular-nums; }
+  #check-verdict {
+    font-size: 1rem; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 0.22rem 0.6rem; border-radius: 3px;
+  }
+  #check-verdict.ok   { background: rgba(88,190,130,0.18); color: #7fd4a2; }
+  #check-verdict.warn { background: rgba(224,164,95,0.18); color: #e6b071; }
+  #check-verdict.fail { background: rgba(224,90,110,0.20); color: #f08494; }
+  /* Multi-column rather than grid: groups are wildly different lengths
+     (Hardware has four checks, State has six), and a grid leaves a hole
+     under the short ones while squeezing every row. Columns flow and
+     balance, so the rows get wide enough that a name like "microphone on
+     the bus" stops wrapping onto two lines. */
+  #check-groups {
+    flex: 1; column-width: 30rem; column-gap: 2.6vw; column-fill: balance;
+    padding-top: 1.4vh; overflow: hidden;
+  }
+  .cgroup { break-inside: avoid; margin-bottom: 1.6vh; }
+  .cgroup h3 {
+    font-size: 0.82rem; letter-spacing: 0.14em; text-transform: uppercase;
+    opacity: 0.45; margin: 0 0 0.35rem; font-weight: 500;
+  }
+  .crow {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    padding: 0.14rem 0; font-size: 1.12rem;
+  }
+  .crow .dot {
+    width: 0.52rem; height: 0.52rem; border-radius: 50%; flex: none;
+    transform: translateY(-0.1rem);
+  }
+  .crow.ok   .dot { background: #4f9d73; }
+  .crow.warn .dot { background: #e0a45f; }
+  .crow.fail .dot { background: #e05a6e; }
+  .crow.skip .dot { background: rgba(255,255,255,0.18); }
+  .crow .nm { flex: 1; }
+  .crow.ok .nm, .crow.skip .nm { opacity: 0.62; }
+  .crow.fail .nm { font-weight: 600; }
+  /* The detail sits right of the name and never pushes it around: the name
+     is what you scan for, so it keeps its space and the detail gives way. */
+  .crow .dt {
+    opacity: 0.5; font-size: 0.92rem; text-align: right;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .crow .nm { flex: 1 1 auto; min-width: 9rem; }
+  .crow.fail .dt, .crow.warn .dt { opacity: 0.8; }
+  .cfix {
+    font-size: 0.92rem; opacity: 0.62; margin: 0 0 0.3rem 1.02rem;
+    padding-left: 0.6rem; border-left: 2px solid rgba(255,255,255,0.14);
+  }
+  #check-foot {
+    padding-top: 1vh; border-top: 1px solid rgba(255,255,255,0.12);
+    font-size: 1.05rem; opacity: 0.7; min-height: 1.6rem;
+  }
+
+  /* ---------- interval timer ---------------------------------------
+     Read from the floor, mid-burpee, upside down. That is the whole brief,
+     and it is why the clock is enormous and nothing else competes with it.
+     Colour carries the phase so you know what to do before you have read a
+     word: green means move, amber means breathe. */
+  #timer {
+    position: fixed; inset: 0; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.4vh; z-index: 60;
+    background: var(--bg, #0b0d10);
+    transition: background 220ms ease;
+  }
+  #timer.on { display: flex; }
+  #timer.work  { background: #0c1a12; }
+  #timer.rest  { background: #1b1408; }
+  #timer.ready { background: #0d1119; }
+  #timer.run, #timer.mark { background: #0c1a12; }
+
+  #timer-name {
+    font-size: 1.6rem; opacity: 0.4; letter-spacing: 0.02em;
+    text-align: center; padding: 0 4vw;
+  }
+  #timer-label {
+    font-size: 5.5rem; font-weight: 600; line-height: 1;
+    letter-spacing: -0.02em; margin-top: 1vh;
+  }
+  #timer.work  #timer-label { color: #63d68f; }
+  #timer.run   #timer-label,
+  #timer.mark  #timer-label { color: #63d68f; }
+  #timer.rest  #timer-label { color: #e8ae5c; }
+  #timer.ready #timer-label { color: #8fa6c4; }
+
+  /* Tabular numerals, or the clock jitters sideways every second and your
+     eye has to re-find it — which is exactly what you cannot spare. */
+  #timer-clock {
+    font-size: 26vh; font-weight: 200; line-height: 0.92;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.03em;
+  }
+  #timer.urgent #timer-clock { color: #f0736f; }
+
+  #timer-round {
+    font-size: 3rem; font-weight: 300; opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+  }
+  #timer-bar {
+    width: 62vw; height: 0.9vh; margin-top: 2.2vh;
+    background: rgba(255,255,255,0.10); border-radius: 99px; overflow: hidden;
+  }
+  #timer-fill {
+    height: 100%; width: 0%; border-radius: 99px;
+    background: rgba(255,255,255,0.55);
+    transition: width 900ms linear;
+  }
+  #timer-left { font-size: 1.5rem; opacity: 0.45; margin-top: 1.4vh;
+                font-variant-numeric: tabular-nums; }
+  #timer.paused #timer-clock { opacity: 0.35; }
+  #timer.paused #timer-label::after { content: " — paused"; opacity: 0.5; }
+  /* Held is not paused. It has never run, so "paused" would be a lie and
+     the clock underneath is a promise rather than a position. */
+  #timer.held #timer-clock { opacity: 0.3; }
+  #timer.held #timer-label::after { content: " — waiting for you";
+                                    opacity: 0.5; }
+  #timer.held #timer-round { color: #8fa6c4; opacity: 0.95;
+                             letter-spacing: 0.02em; }
 </style>
 </head>
 <body class="state-idle">
@@ -339,8 +587,41 @@
     <div id="case-foot"><span id="case-said"></span></div>
   </div>
 
+  <div id="timer">
+    <div id="timer-name"></div>
+    <div id="timer-label">Work</div>
+    <div id="timer-clock">0:00</div>
+    <div id="timer-round"></div>
+    <div id="timer-bar"><div id="timer-fill"></div></div>
+    <div id="timer-left"></div>
+  </div>
+
+  <div id="check">
+    <div id="check-head">
+      <div id="check-title">Systems check</div>
+      <div class="chip" id="check-verdict"></div>
+      <div id="check-spacer"></div>
+      <div id="check-when"></div>
+    </div>
+    <div id="check-groups"></div>
+    <div id="check-foot"><span id="check-summary"></span></div>
+  </div>
+
   <input id="typed" placeholder="Type a question, Enter to send, Esc to dismiss"
          autocomplete="off" spellcheck="false">
+
+  <div id="wall">
+    <div id="wall-line">
+      <span id="wall-dot"></span><span id="wall-word">checking…</span>
+      <span id="wall-groups"></span>
+      <span id="wall-age"></span>
+    </div>
+    <div id="wall-bad"></div>
+  </div>
+
+  <div id="pill">
+    <span id="pill-dot"></span><span id="pill-text">Starting…</span>
+  </div>
 
   <div id="bar">
     <div id="dot"></div>
@@ -404,10 +685,15 @@
       .filter((c) => c.startsWith("state-"))
       .forEach((c) => body.classList.remove(c));
     body.classList.add("state-" + state);
-    $("status").textContent = LABELS[state] || state;
-    $("status").classList.toggle(
-      "pulse", ["listening", "transcribing", "thinking"].includes(state)
-    );
+    const label = LABELS[state] || state;
+    const working = ["listening", "transcribing", "thinking"].includes(state);
+    $("status").textContent = label;
+    $("status").classList.toggle("pulse", working);
+    // The pill says the same thing, above every panel. Same label, same
+    // rule about when to pulse — one source of truth for both, so they
+    // cannot disagree about what she is doing.
+    $("pill-text").textContent = label;
+    $("pill-dot").classList.toggle("pulse", working);
     $("meta").textContent = detail ? detail + " tier" : "";
     if (state === "idle") scheduleIdle();
   }
@@ -440,8 +726,13 @@
   // Two modes from one file: /dashboard pins it on permanently, and a voice
   // request shows it for a while over the conversation view. Sharing the
   // renderer means there is only ever one thing to keep correct.
-  const BOARD_PINNED = new URLSearchParams(location.search).has("board")
-                       || location.pathname.startsWith("/dashboard");
+  // The appliance points at /dashboard. That used to mean "pin the board on
+  // forever"; it now means "this screen has a resting state", and the
+  // resting state is the status wall. There is no keyboard on that machine,
+  // so the wall cannot live behind a shortcut — it has to be the default or
+  // it is nothing. ?board= still pins the board the old way.
+  const BOARD_HOME = location.pathname.startsWith("/dashboard");
+  const BOARD_PINNED = new URLSearchParams(location.search).has("board");
   const BOARD_SECONDS = 90;
   let boardTimer = null, boardPoll = null;
 
@@ -536,8 +827,12 @@
 
   function showBoard(seconds) {
     // The case overlay sits on top of the board, so it has to step aside
-    // rather than the board quietly rendering underneath it.
+    // rather than the board quietly rendering underneath it. So does the
+    // resting wall, which is a fixed panel above the board in the stack —
+    // rendering the board underneath it would look like nothing happened.
     hideCase();
+    $("check").classList.remove("on");
+    wallStripOn(true);
     document.body.classList.add("board-on");
     loadBoard();
     clearInterval(boardPoll);
@@ -557,6 +852,7 @@
     // checklist. The board has its ninety seconds and then the case comes
     // back, because the case is the thing with a deadline on it.
     if (caseData) showCase();
+    else restIfIdle();
   }
 
   // NB: the pinned dashboard is started at the bottom of the case section,
@@ -727,6 +1023,362 @@
     return col;
   }
 
+  // ---------- interval timer ---------------------------------------
+  // Driven entirely by the orchestrator: one message a second carrying where
+  // the session is. Nothing counts down in here, because a browser tab that
+  // has been throttled in the background would drift away from the voice
+  // calling the rounds — and the voice is the part you are listening to.
+  function mmss(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const m = Math.floor(sec / 60), s = sec % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  // Which session is on screen, and whether he has asked for something else
+  // to be in front of it. Both are needed because the orchestrator redraws
+  // the timer once a second: without them, pressing "b" during an AMRAP put
+  // the board up for well under a second before the next draw took the
+  // screen straight back, which looked exactly like the key doing nothing.
+  let timerSession = null;
+  let timerAside = false;
+  let timerLast = null;
+
+  function paintTimer() {
+    const box = $("timer"), m = timerLast;
+    if (!m || !m.running) { box.className = ""; return; }
+    if (timerAside) { box.className = ""; return; }
+    box.className = "on " + (m.kind || "work")
+      + (m.held ? " held" : (m.paused ? " paused" : ""));
+    // The last five seconds go red. By then you are not reading words.
+    // A held timer is never urgent: its clock is not running down.
+    if (m.remaining <= 5 && m.kind !== "ready" && !m.held) {
+      box.classList.add("urgent");
+    }
+  }
+
+  function renderTimer(m) {
+    const box = $("timer");
+    if (!m.running) {
+      timerLast = null; timerSession = null; timerAside = false;
+      box.className = "";
+      // Give the screen back to whatever was underneath. On the pinned
+      // dashboard that is the board, which never left.
+      if (caseData && !BOARD_PINNED) showCase();
+      else restIfIdle();
+      return;
+    }
+
+    // A NEW session takes the screen; a redraw of the one already up does
+    // not. This is the whole fix: "take the screen" is an event, not a
+    // property of every frame.
+    if (m.session !== timerSession) {
+      timerSession = m.session;
+      timerAside = false;
+      hideBoard();
+      hideCheck();
+    }
+
+    // Always keep the contents current, even while it is out of the way, so
+    // bringing it back shows the real clock rather than a stale one.
+    timerLast = m;
+    $("timer-name").textContent = m.name || "";
+    $("timer-label").textContent = m.label || "";
+    $("timer-clock").textContent = mmss(m.remaining);
+    // The round number is the wrong thing to show on a timer that has not
+    // begun. Say what it is waiting for instead.
+    $("timer-round").textContent = m.held
+      ? 'say \u201cgo\u201d when you are ready'
+      : (m.rounds > 1 && m.round ? `round ${m.round} of ${m.rounds}` : "");
+    const pct = m.phase_seconds
+      ? 100 * (1 - m.remaining / m.phase_seconds) : 0;
+    $("timer-fill").style.width = Math.max(0, Math.min(100, pct)) + "%";
+    $("timer-left").textContent =
+      m.total ? mmss(m.left) + " left altogether" : "";
+    paintTimer();
+  }
+
+  function timerRunning() { return timerLast !== null; }
+  // ---------- the status wall --------------------------------------
+  // Polled, not pushed. A wall that goes quietly stale because a websocket
+  // died in the night is the exact failure it exists to catch; a dropped
+  // poll shows up in the corner within ten seconds.
+  const WALL_SECONDS = 5;
+  const WALL_WORDS = { ok: "All well", warn: "Needs a look",
+                       fail: "Something is wrong", skip: "Starting up" };
+  let wallOkAt = 0;
+
+  function wallAgo(s) {
+    if (s === null || s === undefined) return "never";
+    if (s < 60) return Math.round(s) + "s";
+    if (s < 3600) return Math.round(s / 60) + "m";
+    return (s / 3600).toFixed(1) + "h";
+  }
+
+  let stripWanted = true;
+  // Declared here, with the poller that sets it, rather than down beside the
+  // panel it controls: loadWall() runs the moment this script is evaluated.
+  let RESTING = false;
+
+  function renderWall(d) {
+    const box = $("wall");
+    box.className = (stripWanted ? "on " : "") + d.verdict;
+    $("wall-word").textContent = WALL_WORDS[d.verdict] || d.verdict;
+
+    // One dot per group: six of them say more at a glance than twenty-six
+    // rows, and the rows are on /status for when you want them.
+    const worst = {};
+    d.checks.forEach(c => {
+      const rank = { ok: 0, skip: 1, warn: 2, fail: 3 };
+      if (!(c.group in worst) || rank[c.status] > rank[worst[c.group]]) {
+        worst[c.group] = c.status;
+      }
+    });
+    const groups = $("wall-groups");
+    groups.textContent = "";
+    d.groups.forEach(g => {
+      if (!(g in worst)) return;
+      const el = document.createElement("span");
+      el.className = "g " + worst[g];
+      const i = document.createElement("i");
+      const t = document.createElement("span");
+      t.textContent = g.toLowerCase();
+      el.append(i, t);
+      groups.appendChild(el);
+    });
+
+    const bad = $("wall-bad");
+    bad.textContent = "";
+    d.problems.slice(0, 4).forEach(p => {
+      const row = document.createElement("div");
+      row.className = "b";
+      const n = document.createElement("span"); n.className = "n";
+      n.textContent = p.name;
+      const dd = document.createElement("span"); dd.className = "d";
+      dd.textContent = p.detail || "";
+      row.append(n, dd);
+      if (p.fix) {
+        const f = document.createElement("span"); f.className = "f";
+        f.textContent = p.fix;
+        row.appendChild(f);
+      }
+      bad.appendChild(row);
+    });
+    if (d.problems.length > 4) {
+      const more = document.createElement("div");
+      more.className = "b";
+      more.textContent = `and ${d.problems.length - 4} more — see /status`;
+      bad.appendChild(more);
+    }
+  }
+
+  async function loadWall() {
+    try {
+      const r = await fetch("/status.json", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      renderWall(d);
+      // One fetch drives both surfaces. Two pollers on the same endpoint
+      // would eventually disagree with each other, and a status display
+      // that contradicts itself is worse than one that is merely late.
+      RESTING = !!d.resting && BOARD_HOME;
+      if (RESTING && !boardOn() && !caseOn() && !timerOn()) {
+        renderCheck(d, true);
+        wallStripOn(false);
+      } else {
+        wallStripOn(true);
+      }
+      wallOkAt = Date.now();
+      $("wall-age").textContent = "";
+      $("wall-age").classList.remove("stale");
+    } catch (err) {
+      // Keep the last known state on screen. Blanking it would hide the
+      // very thing that just went wrong.
+      const secs = wallOkAt ? Math.round((Date.now() - wallOkAt) / 1000) : 0;
+      $("wall-age").textContent = wallOkAt
+        ? `no answer for ${secs}s` : "orchestrator not answering";
+      $("wall-age").classList.add("stale");
+      wallStripOn(true);
+      if (!wallOkAt) {
+        $("wall").className = "on fail";
+        $("wall-word").textContent = "Orchestrator not answering";
+      }
+    }
+  }
+
+  loadWall();
+  setInterval(loadWall, WALL_SECONDS * 1000);
+
+  function timerOn() { return $("timer").classList.contains("on"); }
+
+  // Step the clock aside for another panel. The timer itself is untouched —
+  // it keeps running, keeps counting him down out loud, and comes back on
+  // the next session or the moment he asks for it.
+  function timerAsideSet(aside) {
+    if (!timerRunning()) return;
+    timerAside = !!aside;
+    paintTimer();
+  }
+
+  function toggleTimer() {
+    if (!timerRunning()) return;
+    timerAsideSet(!timerAside);
+    if (!timerAside) { hideCheck(); }
+  }
+
+  // ---------- systems check ----------------------------------------
+  // Grouped, colour-coded, and showing the FIX for anything that is wrong.
+  // A screen that says "printer: failed" and stops has turned a known problem
+  // into a mystery; the whole point is that you can act from across the room.
+  let checkTimer = null;
+  const CHECK_SECONDS = 90;
+
+  function renderCheck(report, resting) {
+    const wrap = $("check-groups");
+    wrap.textContent = "";
+    const order = ["Hardware", "Services", "Access", "Models",
+                   "Storage", "State"];
+    const byGroup = {};
+    (report.checks || []).forEach(c => {
+      (byGroup[c.group] = byGroup[c.group] || []).push(c);
+    });
+
+    order.forEach(name => {
+      const rows = byGroup[name];
+      if (!rows || !rows.length) return;
+      const box = document.createElement("div");
+      box.className = "cgroup";
+      const h = document.createElement("h3");
+      h.textContent = name;
+      box.appendChild(h);
+      rows.forEach(c => {
+        const row = document.createElement("div");
+        row.className = "crow " + c.status;
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        const nm = document.createElement("span");
+        nm.className = "nm";
+        nm.textContent = c.name;
+        const dt = document.createElement("span");
+        dt.className = "dt";
+        dt.textContent = c.detail || "";
+        row.append(dot, nm, dt);
+        box.appendChild(row);
+        // The fix only for things that are wrong. Printing advice under
+        // twenty passing checks buries the two that need you.
+        if ((c.status === "fail" || c.status === "warn") && c.fix) {
+          const fix = document.createElement("div");
+          fix.className = "cfix";
+          fix.textContent = c.fix;
+          box.appendChild(fix);
+        }
+      });
+      wrap.appendChild(box);
+    });
+
+    const counts = report.counts || {};
+    const verdict = $("check-verdict");
+    if (counts.fail) {
+      verdict.textContent = counts.fail + " failed";
+      verdict.className = "chip fail";
+    } else if (counts.warn) {
+      verdict.textContent = counts.warn + " warning" +
+                            (counts.warn === 1 ? "" : "s");
+      verdict.className = "chip warn";
+    } else {
+      verdict.textContent = "all clear";
+      verdict.className = "chip ok";
+    }
+    $("check-when").textContent = report.at
+      ? new Date(report.at * 1000).toLocaleString([], {
+          weekday: "short", hour: "2-digit", minute: "2-digit" })
+      : "";
+    $("check-summary").textContent = resting
+      ? `${counts.ok || 0} passing · re-read continuously · ` +
+        `full detail at /status`
+      : `${counts.ok || 0} passed, ${counts.skip || 0} not applicable, ` +
+        `checked in ${report.seconds || 0} seconds`;
+
+    $("check-title").textContent = resting ? "Status" : "Systems check";
+    $("check").classList.add("on");
+    $("check").classList.toggle("resting", !!resting);
+    // Resting is the screen's home, so it has no timeout — it is what the
+    // appliance shows when nothing else needs the monitor. A one-off report
+    // still stands down on its own: it is something you walked over to read,
+    // not something to leave up all night. Anything failing holds it twice
+    // as long, because that is the one you came to look at.
+    clearTimeout(checkTimer);
+    checkTimer = null;
+    if (!resting) {
+      hideBoard();
+      const secs = counts.fail ? CHECK_SECONDS * 2 : CHECK_SECONDS;
+      checkTimer = setTimeout(hideCheck, secs * 1000);
+    }
+  }
+
+  // ---------- the resting wall --------------------------------------
+  // There is no keyboard on the appliance, so the full grid cannot live
+  // behind a shortcut. It is the screen's resting state instead: what you
+  // see whenever nothing else has asked for the monitor. Everything that
+  // does ask — the board, a case, a timer, a video — covers it and hands it
+  // back when it is done.
+  function boardOn() { return document.body.classList.contains("board-on"); }
+
+  // The strip and the full grid say the same thing, so only one of them
+  // should ever be on screen.
+  function wallStripOn(on) {
+    stripWanted = !!on;
+    $("wall").classList.toggle("on", stripWanted);
+  }
+
+  // Give the screen back to the wall once whatever borrowed it is finished.
+  function restIfIdle() {
+    if (RESTING && !boardOn() && !caseOn() && !timerOn()) loadWall();
+  }
+
+  async function loadCheck() {
+    // Shows the LAST report. Deliberately never runs a fresh one: a real run
+    // makes a paid API call and a web search, and a keyboard shortcut that
+    // quietly spends money whenever somebody leans on the keyboard is a bad
+    // shortcut. Ask her out loud to run one.
+    try {
+      const r = await fetch("/selfcheck");
+      const data = await r.json();
+      if (data.ran === false) {
+        $("check-groups").textContent = "";
+        $("check-verdict").textContent = "not run yet";
+        $("check-verdict").className = "chip";
+        $("check-when").textContent = "";
+        $("check-summary").textContent =
+          'Say "run a self check" to have her look.';
+        $("check").classList.add("on");
+        clearTimeout(checkTimer);
+        checkTimer = setTimeout(hideCheck, 20000);
+        return;
+      }
+      renderCheck(data);
+    } catch (err) {
+      console.warn("could not load the self check", err);
+    }
+  }
+
+  function hideCheck() {
+    clearTimeout(checkTimer);
+    checkTimer = null;
+    // Refusing to hide the resting wall is the point of the flag: there is
+    // nothing behind it to reveal, and an appliance showing a blank screen
+    // is indistinguishable from one that has died.
+    // Keyed on the class alone, not on the RESTING flag as well. The class
+    // is set by the same call that decided this panel is the resting view,
+    // so it is the honest test; the flag is about whether this SCREEN has a
+    // resting state at all, and the two drift apart on a page that has not
+    // reached the orchestrator yet.
+    if ($("check").classList.contains("resting")) return;
+    $("check").classList.remove("on");
+    restIfIdle();
+  }
+
+  function checkOn() { return $("check").classList.contains("on"); }
+
   function showCase() {
     document.body.classList.add("case-on");
     // Tear the board down directly rather than through hideBoard(), which
@@ -748,6 +1400,7 @@
     document.body.classList.remove("case-on");
     clearInterval(casePoll); casePoll = null;
     clearInterval(caseTick); caseTick = null;
+    restIfIdle();
   }
 
   // The case is over. Drop the data as well as the classes, or hideBoard()
@@ -772,14 +1425,6 @@
   loadCase();
 
   // B toggles the board; C the case; Escape dismisses whichever is up.
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "b" || e.key === "B") {
-      document.body.classList.contains("board-on")
-        ? hideBoard() : showBoard(BOARD_SECONDS);
-    } else if (e.key === "c" || e.key === "C") {
-      caseOn() ? hideCase() : loadCase();
-    } else if (e.key === "Escape") { hideBoard(); hideCase(); }
-  });
 
   function connect() {
     ws = new WebSocket(`ws://${location.host}/ws/display`);
@@ -787,7 +1432,13 @@
     ws.onopen = () => { backoff = 500; };
 
     ws.onmessage = (ev) => {
-      const m = JSON.parse(ev.data);
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (err) {
+        console.warn("dropped a malformed frame", err);
+        return;
+      }
       switch (m.type) {
         case "hello":
           name = m.name;
@@ -797,9 +1448,12 @@
           setState(m.state, m.detail);
           break;
         case "show_board":
+          // Asking for another screen is asking the clock to step aside.
+          timerAsideSet(true);
           showBoard(BOARD_SECONDS);
           break;
         case "show_case":
+          timerAsideSet(true);
           loadCase();
           break;
         case "hide_case":
@@ -813,6 +1467,10 @@
           break;
         case "transcript":
           hideBoard();
+          hideCheck();
+          // The timer stays. Asking "how long left" must not take the clock
+          // off the screen to show you the words you just said.
+          if (timerOn()) break;
           // Mid-investigation the checklist stays put and the conversation
           // shrinks to one line at the bottom. Swapping a 28-step checklist
           // out for one sentence, every time you speak, is how a screen
@@ -837,9 +1495,36 @@
           if (caseOn()) $("case-said").textContent = $("reply").textContent;
           scheduleIdle();
           break;
+        case "interval":
+          renderTimer(m);
+          break;
+        case "interval_view":
+          // "Show the timer" / "put the clock away", said out loud. A
+          // one-shot instruction, never a field on the per-second draw —
+          // that would overrule the keyboard within a second.
+          timerAsideSet(!m.show);
+          if (m.show) { hideCheck(); }
+          break;
+        case "selfcheck":
+          timerAsideSet(true);
+          renderCheck(m);
+          break;
         case "barge_in":
           $("reply").textContent = "";
           break;
+        case "reminder":
+          // This case was missing entirely, so a fired timer was spoken and
+          // never drawn. On the ambient screen the alarm went off and the
+          // display said nothing at all.
+          showConvo();
+          $("heard").textContent = m.kind === "timer" ? "Timer" : "Reminder";
+          $("reply").textContent = m.text || "";
+          scheduleIdle();
+          break;
+        default:
+          // Anything unhandled used to vanish silently, which is exactly how
+          // the missing `reminder` case went unnoticed.
+          console.warn("unhandled display message:", m.type, m);
       }
     };
 
@@ -875,6 +1560,37 @@
       }
       return;
     }
+    // Shortcuts. These used to live in a SECOND keydown listener that never
+    // checked whether the text box had focus — so pressing "b" toggled the
+    // board *and* opened the input pre-filled with "b", and typing the letter
+    // c into the input swapped the case overlay out from under you. One
+    // listener, input wins, every branch returns.
+    if (e.key === "b" || e.key === "B") {
+      timerAsideSet(true);
+      document.body.classList.contains("board-on")
+        ? hideBoard() : showBoard(BOARD_SECONDS);
+      return;
+    }
+    if (e.key === "c" || e.key === "C") {
+      timerAsideSet(true);
+      caseOn() ? hideCase() : loadCase();
+      return;
+    }
+    if (e.key === "d" || e.key === "D") {
+      timerAsideSet(true);
+      checkOn() ? hideCheck() : loadCheck();
+      return;
+    }
+    if (e.key === "t" || e.key === "T") {
+      toggleTimer();
+      return;
+    }
+    if (e.key === "Escape") {
+      hideBoard(); hideCase(); hideCheck();
+      // The screen only. The timer runs on, and t brings it back.
+      timerAsideSet(true);
+      return;
+    }
     if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       input.style.display = "block";
       nudgeCursor();
@@ -883,6 +1599,15 @@
       e.preventDefault();
     }
   });
+  // A handle for the devtools console, and for rendering a panel from a
+  // saved report without waiting for a real one. Everything above is inside
+  // an IIFE, which is right — but it also means there is no way to poke at
+  // the screen when something looks wrong on the appliance itself.
+  window.lance = { renderCheck, hideCheck, loadCheck, showBoard, hideBoard,
+                   restIfIdle, wallStripOn,
+                   loadCase, hideCase, setState, renderTimer, toggleTimer,
+                   timerAsideSet, timerOn, loadWall, renderWall,
+                   get timerAside() { return timerAside; } };
 })();
 </script>
 </body>

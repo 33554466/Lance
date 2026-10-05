@@ -1180,6 +1180,8 @@ from .printer import PrinterTools
 from .embed import Embedder, SemanticIndex
 from .workout import WorkoutTools
 from .media import MediaTools
+from .selfcheck import SelfCheckTools
+from .intervals import IntervalTools
 
 # Where the appliance lives on disk. Used for the mpv IPC socket, which has to
 # sit somewhere writable and predictable — the data directory, alongside the
@@ -1210,21 +1212,46 @@ class Toolbox:
         # the same board "add milk to the honey-do list" does — two resolvers
         # would drift, and the failure mode is a printed list that is real but
         # not the one that was asked for.
-        self.printer = PrinterTools(cfg, store, timers=self.timers,
-                                    doctools=self.docs)
         # Workouts borrow the case matcher: the same loose spoken-name
         # matching that ticks off 'I purged it' ticks off 'bench done'.
+        # Built before the printer, which borrows the workout resolver for
+        # the same reason it borrows the list one.
         self.workouts = WorkoutTools(cfg, store, cases=self.cases)
+        self.printer = PrinterTools(cfg, store, timers=self.timers,
+                                    doctools=self.docs,
+                                    workouts=self.workouts)
         # Media owns a child process, which nothing else here does. It needs
         # ROOT for the default IPC socket path, and app.py hands it the
         # scheduler tick so a finished video stops being "playing".
         self.media = MediaTools(cfg, ROOT)
+        # The diagnostic is attached by app.py, which owns the hub. Until then
+        # it offers no tools, so an import of this module on its own — which
+        # every test does — cannot reach half the appliance.
+        self.checker = None
+        self.selfcheck: SelfCheckTools | None = None
+        # The interval timer needs the hub to speak, so like the diagnostic it
+        # is attached by app.py rather than built here.
+        self.runner = None
+        self.intervals: IntervalTools | None = None
+
+    def attach_selfcheck(self, checker, hub=None) -> None:
+        """Give the toolbox its diagnostic, once app.py has a hub to show it."""
+        self.checker = checker
+        self.selfcheck = SelfCheckTools(checker, printer=self.printer, hub=hub)
+
+    def attach_intervals(self, runner) -> None:
+        """Give the toolbox the interval timer, once it has a hub to call
+        rounds through."""
+        self.runner = runner
+        self.intervals = IntervalTools(runner)
 
     def schemas(self) -> list[dict]:
         return (self.docs.schemas() + self.mem.schemas()
                 + self.timers.schemas() + self.desktop.schemas()
                 + self.cases.schemas() + self.printer.schemas()
-                + self.workouts.schemas() + self.media.schemas())
+                + self.workouts.schemas() + self.media.schemas()
+                + (self.selfcheck.schemas() if self.selfcheck else [])
+                + (self.intervals.schemas() if self.intervals else []))
 
     def memory_block(self) -> str:
         return self.mem.block()
@@ -1238,11 +1265,13 @@ class Toolbox:
             return f"That failed: {type(exc).__name__}: {exc}"
 
     def _run_sync(self, name: str, args: dict) -> str:
-        for handler in (self.media.run_sync,
+        handlers = ([self.intervals.run_sync] if self.intervals else [])
+        handlers += ([self.selfcheck.run_sync] if self.selfcheck else [])
+        for handler in handlers + [self.media.run_sync,
                         self.workouts.run_sync, self.printer.run_sync,
                         self.cases.run_sync,
                         self.desktop.run_sync, self.timers.run_sync,
-                        self.mem.run_sync):
+                        self.mem.run_sync]:
             out = handler(name, args)
             if out is not None:
                 return out
