@@ -1148,7 +1148,7 @@ selfcheck:
   # Worth knowing why this is on: the slip existing at all is proof the printer
   # works. Every other check in the report is an assertion about hardware; this
   # one is the hardware agreeing.
-  print_daily: true
+  print_daily: false
   print_everything: false
 
   # --- the checks that cost something ---
